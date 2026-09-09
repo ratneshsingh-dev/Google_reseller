@@ -38,9 +38,22 @@ window.addEventListener('DOMContentLoaded', async () => {
     const r = await fetch('/api/v1/config/oauth-client-id');
     if (r.ok) {
       const { client_id } = await r.json();
-      if (client_id) {
-        document.getElementById('g_id_onload')?.setAttribute('data-client_id', client_id);
-      }
+      
+      const initGoogle = () => {
+        if (!window.google) { setTimeout(initGoogle, 300); return; }
+        if (client_id) {
+          google.accounts.id.initialize({
+            client_id: client_id,
+            callback: handleGoogleLogin,
+            auto_select: true
+          });
+          google.accounts.id.renderButton(
+            document.getElementById('google-signin-btn'),
+            { theme: 'filled_black', size: 'large', shape: 'pill', width: 360 }
+          );
+        }
+      };
+      initGoogle();
     }
   } catch (_) {}
 
