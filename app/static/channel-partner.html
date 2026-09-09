@@ -34,27 +34,6 @@
       <!-- Google Sign-In Button -->
       <div id="google-signin-btn" style="display:flex;justify-content:center;margin:1.5rem 0;"></div>
 
-      <div class="login-divider"><span>or</span></div>
-
-      <!-- Fallback: email + secret for local/dev -->
-      <details class="login-fallback">
-        <summary>Sign in with Client Secret (dev/API only)</summary>
-        <div style="margin-top:1rem;">
-          <div class="form-group">
-            <label class="form-label">Contact Email</label>
-            <input type="email" id="login-email" class="form-input" placeholder="you@company.com">
-          </div>
-          <div class="form-group">
-            <label class="form-label">Client Secret</label>
-            <input type="password" id="login-secret" class="form-input" placeholder="sec_...">
-          </div>
-          <button class="btn-login" id="btn-login" onclick="doLogin()">
-            <span id="login-btn-text">Sign In</span>
-            <div id="login-spinner" class="btn-spinner" style="display:none;"></div>
-          </button>
-        </div>
-      </details>
-
       <p class="login-footer">Only registered channel partners can access this portal.<br>Contact your admin if you need access.</p>
     </div>
   </div>
