@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Channel Partner Portal | Google Workspace Provisioning</title>
+  <meta name="description" content="Channel partner self-service portal to provision companies, upload CSV, and manage licences.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <link rel="stylesheet" href="/static/css/channel-partner.css">
+</head>
+<body>
+
+  <!-- ===== LOGIN SCREEN ===== -->
+  <div id="login-screen" class="screen">
+    <div class="login-bg">
+      <div class="login-orb orb-1"></div>
+      <div class="login-orb orb-2"></div>
+    </div>
+    <div class="login-card">
+      <div class="login-logo">
+        <div class="logo-icon">CP</div>
+        <div>
+          <div class="logo-title">Channel Partner Portal</div>
+          <div class="logo-sub">Google Workspace Provisioning</div>
+        </div>
+      </div>
+      <h1 class="login-heading">Sign in to your portal</h1>
+      <p class="login-desc">Use the Google account your admin registered you with</p>
+      <div id="login-error" class="login-error" style="display:none;"></div>
+
+      <!-- Google Sign-In Button -->
+      <div id="g_id_onload"
+           data-client_id=""
+           data-context="signin"
+           data-ux_mode="popup"
+           data-callback="handleGoogleLogin"
+           data-auto_prompt="false">
+      </div>
+      <div class="g_id_signin google-signin-wrapper"
+           data-type="standard"
+           data-shape="rectangular"
+           data-theme="filled_black"
+           data-text="signin_with"
+           data-size="large"
+           data-logo_alignment="left"
+           data-width="360">
+      </div>
+
+      <div class="login-divider"><span>or</span></div>
+
+      <!-- Fallback: email + secret for local/dev -->
+      <details class="login-fallback">
+        <summary>Sign in with Client Secret (dev/API only)</summary>
+        <div style="margin-top:1rem;">
+          <div class="form-group">
+            <label class="form-label">Contact Email</label>
+            <input type="email" id="login-email" class="form-input" placeholder="you@company.com">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Client Secret</label>
+            <input type="password" id="login-secret" class="form-input" placeholder="sec_...">
+          </div>
+          <button class="btn-login" id="btn-login" onclick="doLogin()">
+            <span id="login-btn-text">Sign In</span>
+            <div id="login-spinner" class="btn-spinner" style="display:none;"></div>
+          </button>
+        </div>
+      </details>
+
+      <p class="login-footer">Only registered channel partners can access this portal.<br>Contact your admin if you need access.</p>
+    </div>
+  </div>
+
+  <!-- ===== MAIN APP ===== -->
+  <div id="app-screen" class="screen" style="display:none;">
+
+    <!-- Navbar -->
+    <header class="cp-navbar">
+      <div class="cp-brand">
+        <div class="cp-brand-icon">CP</div>
+        <div>
+          <div class="cp-brand-name" id="brand-company">Channel Partner</div>
+          <div class="cp-brand-sub">Partner Portal</div>
+        </div>
+      </div>
+      <div class="cp-nav-right">
+        <div class="cp-quota-pill" id="nav-quota">
+          <span class="quota-used" id="nav-used">—</span>
+          <span class="quota-sep">/</span>
+          <span class="quota-cap" id="nav-cap">—</span>
+          <span class="quota-label">licences</span>
+        </div>
+        <div class="cp-user-badge">
+          <span class="user-dot"></span>
+          <span id="nav-email">—</span>
+        </div>
+        <button class="cp-logout-btn" onclick="doLogout()">Sign Out</button>
+      </div>
+    </header>
+
+    <!-- Tab Nav -->
+    <nav class="cp-tabs">
+      <button class="cp-tab active" id="tab-companies" onclick="switchTab('companies')">
+        🏢 My Companies
+      </button>
+      <button class="cp-tab" id="tab-manual" onclick="switchTab('manual')" style="display:none;">
+        🚀 Manual Provision
+      </button>
+      <button class="cp-tab" id="tab-csv" onclick="switchTab('csv')" style="display:none;">
+        📤 Upload CSV
+      </button>
+      <button class="cp-tab" id="tab-api" onclick="switchTab('api')" style="display:none;">
+        ⚡ API Guide
+      </button>
+      <button class="cp-tab" id="tab-quota" onclick="switchTab('quota')">
+        📊 Quota
+      </button>
+    </nav>
+
+    <main class="cp-main">
+
+      <!-- === MANUAL PROVISION TAB === -->
+      <section id="tab-content-manual" class="tab-content" style="display:none;">
+        <div class="section-header">
+          <h2 class="section-title">🚀 Onboard Company Workspace</h2>
+          <p class="section-sub">Create customer, subscription, and provision a workspace in one request</p>
+        </div>
+
+        <div style="display:flex;justify-content:flex-end;gap:0.6rem;margin-bottom:1rem;">
+          <button type="button" class="mf-action-btn" onclick="fillManualSampleData()">⚡ Fill Sample Data</button>
+          <button type="button" class="mf-action-btn" onclick="resetManualForm()">↺ Reset</button>
+        </div>
+
+        <div id="manual-error-box" class="manual-error-box" style="display:none;"></div>
+
+        <form id="manual-provision-form" class="manual-form" onsubmit="return false;">
+          <!-- Company & Domain Details -->
+          <div class="mf-grid-3">
+            <div class="mf-group">
+              <label class="mf-label">Company Name <span class="mf-req">*</span></label>
+              <input type="text" class="mf-input" id="mf-company-name" required placeholder="e.g. ABC Pvt Ltd">
+            </div>
+            <div class="mf-group">
+              <label class="mf-label">Primary Domain <span class="mf-req">*</span></label>
+              <input type="text" class="mf-input" id="mf-primary-domain" required placeholder="e.g. abc.com">
+            </div>
+            <div class="mf-group">
+              <label class="mf-label">Alternate / Recovery Email <span class="mf-req">*</span></label>
+              <input type="email" class="mf-input" id="mf-alternate-email" required placeholder="e.g. owner@gmail.com">
+            </div>
+          </div>
+
+          <!-- Contact & Address -->
+          <div class="mf-grid-4">
+            <div class="mf-group">
+              <label class="mf-label">Contact Person <span class="mf-req">*</span></label>
+              <input type="text" class="mf-input" id="mf-contact-name" required placeholder="e.g. John Doe">
+            </div>
+            <div class="mf-group">
+              <label class="mf-label">Address Line 1 <span class="mf-req">*</span></label>
+              <input type="text" class="mf-input" id="mf-address" required placeholder="e.g. 123 Tech Park">
+            </div>
+            <div class="mf-group">
+              <label class="mf-label">City / Locality <span class="mf-req">*</span></label>
+              <input type="text" class="mf-input" id="mf-locality" required placeholder="e.g. Bengaluru">
+            </div>
+            <div class="mf-group">
+              <label class="mf-label">Postal Code & Country <span class="mf-req">*</span></label>
+              <div style="display:flex;gap:0.4rem;">
+                <input type="text" class="mf-input" id="mf-postal" required placeholder="560001" style="flex:2;">
+                <input type="text" class="mf-input" id="mf-country" required placeholder="IN" maxlength="2" style="flex:1;text-transform:uppercase;">
+              </div>
+            </div>
+          </div>
+
+          <!-- Plan & Licensing -->
+          <div class="mf-grid-3">
+            <div class="mf-group">
+              <label class="mf-label">Workspace Plan <span class="mf-req">*</span></label>
+              <select class="mf-input" id="mf-plan" required>
+                <option value="TRIAL">Trial (30 Days free)</option>
+                <option value="FLEXIBLE">Flexible Plan (Monthly)</option>
+                <option value="ANNUAL_MONTHLY_PAY">Annual Plan (Monthly Pay)</option>
+                <option value="ANNUAL_YEARLY_PAY">Annual Plan (Yearly Pay)</option>
+              </select>
+            </div>
+            <div class="mf-group">
+              <label class="mf-label">Google Workspace SKU <span class="mf-req">*</span></label>
+              <select class="mf-input" id="mf-sku" required>
+                <option value="1010020027">Business Starter</option>
+                <option value="1010020028">Business Standard</option>
+                <option value="1010020025">Business Plus</option>
+                <option value="1010020029">Enterprise Standard</option>
+                <option value="1010020030">Enterprise Plus</option>
+              </select>
+            </div>
+            <div class="mf-group">
+              <label class="mf-label">Licensed Seats <span class="mf-req">*</span></label>
+              <input type="number" class="mf-input" id="mf-license-count" min="1" max="100" value="5" required>
+            </div>
+          </div>
+
+          <!-- Notification Email (auto-filled from login, read-only) -->
+          <div class="mf-grid-3" style="margin-bottom:1.25rem;">
+            <div class="mf-group" style="grid-column:1/-1;">
+              <label class="mf-label">
+                Your Notification Email
+                <span style="color:var(--text-3);font-weight:400;margin-left:0.4rem;">(auto-filled from your login — you will receive the provisioning confirmation)</span>
+              </label>
+              <input type="email" class="mf-input" id="mf-init-email" readonly
+                style="background:rgba(99,102,241,0.05);color:var(--text-2);cursor:default;"
+                placeholder="Loading...">
+            </div>
+          </div>
+
+          <!-- Admin Account -->
+          <div class="mf-divider">
+            <span class="mf-divider-label">👤 Admin Account to Create</span>
+            <span class="mf-divider-hint">This admin will manage remaining users via admin.google.com</span>
+          </div>
+          <div class="mf-grid-3">
+            <div class="mf-group">
+              <label class="mf-label">Admin First Name <span class="mf-req">*</span></label>
+              <input type="text" class="mf-input" id="mf-admin-first" required placeholder="e.g. John">
+            </div>
+            <div class="mf-group">
+              <label class="mf-label">Admin Last Name <span class="mf-req">*</span></label>
+              <input type="text" class="mf-input" id="mf-admin-last" required placeholder="e.g. Doe">
+            </div>
+            <div class="mf-group">
+              <label class="mf-label">Admin Recovery Email</label>
+              <input type="email" class="mf-input" id="mf-admin-recovery" placeholder="e.g. john@gmail.com">
+            </div>
+          </div>
+
+          <button type="button" class="mf-submit-btn" id="btn-manual-provision" onclick="submitManualProvision()">
+            🚀 Provision Domain & Admin Account
+          </button>
+        </form>
+
+        <!-- Job status card (shown after submission) -->
+        <div id="manual-job-result" style="display:none;margin-top:1.5rem;"></div>
+
+      </section>
+
+      <!-- === COMPANIES TAB === -->
+      <section id="tab-content-companies" class="tab-content active">
+        <div class="section-header">
+          <h2 class="section-title">My Provisioned Companies</h2>
+          <p class="section-sub">All companies provisioned under your account</p>
+        </div>
+        <div id="companies-list" class="companies-grid">
+          <div class="loading-state"><div class="spinner"></div><p>Loading companies...</p></div>
+        </div>
+      </section>
+
+      <!-- === CSV UPLOAD TAB === -->
+      <section id="tab-content-csv" class="tab-content" style="display:none;">
+        <div class="section-header">
+          <h2 class="section-title">Bulk Provision via CSV</h2>
+          <p class="section-sub">Upload a CSV file to provision multiple companies at once</p>
+        </div>
+
+        <!-- CSV Format Guide -->
+        <div class="info-card">
+          <div class="info-card-title">📋 Required CSV Columns</div>
+          <div class="csv-columns">
+            <code>company_name, primary_domain, admin_first_name, admin_last_name, alternate_email, contact_name, admin_recovery_email, address_line1, locality, region, postal_code, country_code, plan, sku_id, license_count</code>
+          </div>
+          <div class="csv-example-row">
+            <strong>Example row:</strong><br>
+            <code>NovaTech Solutions, novatechsolutions.com, Arjun, Mehta, arjun@example.com, Arjun Mehta, arjun.alt@example.com, 78 Innovation Park, Gurugram, HR, 122016, IN, TRIAL, 1030040059, 5</code>
+          </div>
+          <button class="btn-outline" onclick="downloadTemplate()">⬇ Download Template CSV</button>
+        </div>
+
+        <!-- Upload Area -->
+        <div class="upload-area" id="upload-area"
+             ondragover="event.preventDefault(); this.classList.add('drag-over')"
+             ondragleave="this.classList.remove('drag-over')"
+             ondrop="handleDrop(event)">
+          <div class="upload-icon">📁</div>
+          <div class="upload-text">Drag & drop your CSV here</div>
+          <div class="upload-sub">or</div>
+          <label class="btn-upload" for="csv-file-input">Browse File</label>
+          <input type="file" id="csv-file-input" accept=".csv" style="display:none;" onchange="handleFileSelect(event)">
+          <div id="upload-filename" class="upload-filename" style="display:none;"></div>
+        </div>
+
+        <div id="csv-preview" style="display:none;">
+          <div class="preview-header">
+            <span id="preview-count"></span>
+            <button class="btn-outline" onclick="clearFile()">✕ Clear</button>
+          </div>
+          <div class="preview-table-wrap">
+            <table class="preview-table" id="preview-table"></table>
+          </div>
+        </div>
+
+        <div id="upload-error" class="upload-error" style="display:none;"></div>
+
+        <button class="btn-provision" id="btn-provision-csv" style="display:none;" onclick="submitCSV()">
+          🚀 Provision All Companies
+        </button>
+
+        <!-- Jobs list -->
+        <div id="csv-jobs" style="margin-top:2rem;"></div>
+      </section>
+
+      <!-- === API GUIDE TAB === -->
+      <section id="tab-content-api" class="tab-content" style="display:none;">
+        <div class="section-header">
+          <h2 class="section-title">API Integration Guide</h2>
+          <p class="section-sub">Use these credentials to integrate directly with our provisioning API</p>
+        </div>
+
+        <div class="api-creds-card">
+          <div class="cred-row">
+            <div class="cred-label">Client ID</div>
+            <div class="cred-value-row">
+              <input type="text" class="cred-input" id="api-client-id" readonly>
+              <button class="copy-btn" onclick="copyField('api-client-id')">📋</button>
+            </div>
+          </div>
+          <div class="cred-row">
+            <div class="cred-label">Email (for portal login)</div>
+            <div class="cred-value-row">
+              <input type="text" class="cred-input" id="api-email" readonly>
+              <button class="copy-btn" onclick="copyField('api-email')">📋</button>
+            </div>
+          </div>
+          <div class="cred-row">
+            <div class="cred-label">Token Endpoint</div>
+            <div class="cred-value-row">
+              <input type="text" class="cred-input" id="api-token-url" readonly>
+              <button class="copy-btn" onclick="copyField('api-token-url')">📋</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="api-steps">
+          <h3 class="steps-title">Quick Start</h3>
+
+          <div class="api-step">
+            <div class="step-num">1</div>
+            <div class="step-body">
+              <div class="step-title">Get Access Token</div>
+              <pre class="code-block" id="code-get-token"></pre>
+            </div>
+          </div>
+
+          <div class="api-step">
+            <div class="step-num">2</div>
+            <div class="step-body">
+              <div class="step-title">Provision a Company</div>
+              <pre class="code-block" id="code-provision"></pre>
+            </div>
+          </div>
+
+          <div class="api-step">
+            <div class="step-num">3</div>
+            <div class="step-body">
+              <div class="step-title">Check Job Status</div>
+              <pre class="code-block" id="code-job-status"></pre>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- === QUOTA TAB === -->
+      <section id="tab-content-quota" class="tab-content" style="display:none;">
+        <div class="section-header">
+          <h2 class="section-title">Licence Quota</h2>
+          <p class="section-sub">Your current licence usage and limits</p>
+        </div>
+        <div class="quota-card" id="quota-detail">
+          <div class="loading-state"><div class="spinner"></div><p>Loading quota...</p></div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="cp-toast"></div>
+
+  <!--
+    Channel Partner Portal — JavaScript Modules
+    Each file handles exactly one feature. Open the relevant file to debug:
+
+      cp-core.js       → shared state, apiFetch, tab switching, init, utilities
+      cp-auth.js       → login (Google & email+secret), logout
+      cp-companies.js  → My Companies tab
+      cp-quota.js      → Licence Quota tab
+      cp-csv.js        → CSV Bulk Upload tab
+      cp-manual.js     → Manual Provision tab (form + job polling)
+      cp-api-guide.js  → API Integration Guide tab
+  -->
+  <script src="/static/js/cp-core.js"></script>
+  <script src="/static/js/cp-auth.js"></script>
+  <script src="/static/js/cp-companies.js"></script>
+  <script src="/static/js/cp-quota.js"></script>
+  <script src="/static/js/cp-csv.js"></script>
+  <script src="/static/js/cp-manual.js"></script>
+  <script src="/static/js/cp-api-guide.js"></script>
+</body>
+</html>

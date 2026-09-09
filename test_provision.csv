@@ -1,0 +1,2 @@
+company_name,primary_domain,alternate_email,contact_name,address_line1,locality,region,postal_code,country_code,plan,sku_id,license_count,admin_first_name,admin_last_name,admin_recovery_email,initiated_by_email,econz_notification_email
+Ratnesh Test Corp,ratnesh-csvtest1-2026.com,ratnesh.s@econz.net,Ratnesh Singh,123 Tech Park,Bengaluru,KA,560001,IN,TRIAL,1010020027,2,Ratnesh,Singh,ratnesh.s@econz.net,ratnesh.s@econz.net,ratnesh.s@econz.net

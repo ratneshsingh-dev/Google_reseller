@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Channel Partner Admin | Google Workspace Provisioning</title>
+  <meta name="description" content="Manage channel partners, set access methods, licence caps and monitor usage from the admin dashboard.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Roboto+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/reseller-admin.css">
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+
+<body>
+
+  <!-- Login Overlay -->
+  <div id="login-overlay" class="login-overlay">
+    <div class="login-card">
+      <div class="login-icon">🔐</div>
+      <h1 class="login-title">Reseller Admin Panel</h1>
+      <p class="login-subtitle">Admin access required. Sign in with your Google account.</p>
+      <div id="google-signin-btn" style="display:flex;justify-content:center;margin:1.5rem 0;"></div>
+      <div style="text-align:center;margin-bottom:1.5rem;">
+        <button id="dev-login-btn" class="btn btn-secondary" style="font-size:0.8rem;padding:0.4rem 1rem;" onclick="devLogin()">
+          🛠️ Dev Bypass Login
+        </button>
+      </div>
+      <p class="login-footer">Only authorised admin emails can access this panel</p>
+    </div>
+  </div>
+
+  <!-- Main App (hidden until logged in) -->
+  <div id="app" style="display:none;">
+
+    <!-- Navbar -->
+    <header class="navbar">
+      <div class="brand-wrapper">
+        <div class="brand-icon">G</div>
+        <div>
+          <div class="brand-title">Channel Partner Admin</div>
+          <div class="brand-subtitle">Access Control &amp; Licence Management</div>
+        </div>
+      </div>
+      <div class="header-badges">
+        <div class="gcp-badge">
+          <span class="pulse-dot"></span>
+          <span>Admin Panel</span>
+        </div>
+        <div class="user-badge" id="user-badge">
+          <img id="user-avatar" src="" alt="avatar" class="user-avatar">
+          <span id="user-display-name" class="user-name"></span>
+        </div>
+        <a href="/static/index.html" class="btn btn-secondary" style="padding:0.35rem 0.8rem;font-size:0.8rem;">
+          ← Main Panel
+        </a>
+        <button class="btn btn-secondary" id="btn-logout" onclick="handleLogout()" style="padding:0.35rem 0.8rem;font-size:0.8rem;">
+          🚪 Logout
+        </button>
+      </div>
+    </header>
+
+    <!-- Summary Stats Bar -->
+    <div class="stats-bar" id="stats-bar">
+      <div class="stat-card" id="stat-total">
+        <div class="stat-number" id="stat-total-val">—</div>
+        <div class="stat-label">Total Resellers</div>
+      </div>
+      <div class="stat-card stat-active" id="stat-active">
+        <div class="stat-number" id="stat-active-val">—</div>
+        <div class="stat-label">Active</div>
+      </div>
+      <div class="stat-card stat-warn" id="stat-suspended">
+        <div class="stat-number" id="stat-suspended-val">—</div>
+        <div class="stat-label">Suspended</div>
+      </div>
+      <div class="stat-card stat-info" id="stat-licences">
+        <div class="stat-number" id="stat-licences-val">—</div>
+        <div class="stat-label">Total Licences Used</div>
+      </div>
+      <div class="stat-card stat-primary" id="stat-cap">
+        <div class="stat-number" id="stat-cap-val">—</div>
+        <div class="stat-label">Total Licence Cap</div>
+      </div>
+      <div class="stat-card" id="stat-util">
+        <div class="stat-number" id="stat-util-val">—</div>
+        <div class="stat-label">Overall Utilization</div>
+      </div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="dashboard-layout">
+
+      <!-- Left Panel: Reseller List -->
+      <div class="panel panel-list">
+        <div class="panel-header">
+          <div>
+            <h2 class="panel-title">Channel Partners</h2>
+            <p class="panel-subtitle">All registered third-party channel partners</p>
+          </div>
+          <button class="btn btn-primary" id="btn-add-reseller" onclick="openCreateModal()">
+            + Add Channel Partner
+          </button>
+        </div>
+
+        <!-- Filter/Search -->
+        <div class="search-bar">
+          <input type="text" id="reseller-search" class="form-input" placeholder="Search by company name or email..." oninput="filterResellers()">
+          <select id="status-filter" class="form-input" style="width:140px;" onchange="filterResellers()">
+            <option value="">All Statuses</option>
+            <option value="ACTIVE">Active</option>
+            <option value="SUSPENDED">Suspended</option>
+            <option value="DEACTIVATED">Deactivated</option>
+          </select>
+        </div>
+
+        <!-- Reseller Cards -->
+        <div id="reseller-list" class="reseller-list">
+          <div class="loading-state" id="resellers-loading">
+            <div class="spinner"></div>
+            <p>Loading resellers...</p>
+          </div>
+          <div class="empty-state" id="resellers-empty" style="display:none;">
+            <div style="font-size:2.5rem;margin-bottom:0.75rem;">🤝</div>
+            <p>No reseller partners yet.</p>
+            <p style="font-size:0.85rem;color:var(--text-muted);">Click "Add Reseller" to create the first one.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Right Panel: Detail View -->
+      <div class="panel panel-detail" id="detail-panel">
+        <div class="detail-empty" id="detail-empty">
+          <div style="font-size:3rem;margin-bottom:1rem;">👈</div>
+          <p style="color:var(--text-secondary);">Select a reseller to view details</p>
+        </div>
+
+        <!-- Detail Content (hidden until selected) -->
+        <div id="detail-content" style="display:none;">
+          <div class="detail-header">
+            <div class="detail-avatar" id="detail-avatar">R</div>
+            <div class="detail-info">
+              <div class="detail-company" id="detail-company">Company Name</div>
+              <div class="detail-email" id="detail-email">email@company.com</div>
+              <div class="detail-meta">
+                <span class="role-badge" id="detail-role-badge">RESELLER_FULL</span>
+                <span class="status-badge" id="detail-status-badge">ACTIVE</span>
+              </div>
+            </div>
+            <div class="detail-actions">
+              <button class="btn btn-sm btn-secondary" onclick="editReseller()">✏️ Edit</button>
+              <button class="btn btn-sm btn-warning" id="btn-suspend" onclick="toggleSuspend()">⏸ Suspend</button>
+              <button class="btn btn-sm btn-danger" onclick="confirmDeactivate()">🗑 Deactivate</button>
+            </div>
+          </div>
+
+          <!-- Quota Bar -->
+          <div class="quota-section">
+            <div class="quota-header">
+              <span class="quota-label">Licence Usage</span>
+              <span class="quota-numbers" id="detail-quota-numbers">0 / 0</span>
+            </div>
+            <div class="quota-bar-bg">
+              <div class="quota-bar-fill" id="detail-quota-bar" style="width:0%"></div>
+            </div>
+            <div class="quota-footer">
+              <span id="detail-remaining">0 remaining</span>
+              <span id="detail-percent">0%</span>
+            </div>
+          </div>
+
+          <!-- Info Grid -->
+          <div class="info-grid">
+            <div class="info-item">
+              <div class="info-label">Reseller ID</div>
+              <div class="info-value mono" id="detail-id">—</div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">Contact Name</div>
+              <div class="info-value" id="detail-contact">—</div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">RBAC Role</div>
+              <div class="info-value" id="detail-role">—</div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">Created By</div>
+              <div class="info-value" id="detail-created-by">—</div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">Created At</div>
+              <div class="info-value" id="detail-created-at">—</div>
+            </div>
+            <div class="info-item">
+              <div class="info-label">Last API Call</div>
+              <div class="info-value" id="detail-last-call">—</div>
+            </div>
+          </div>
+
+          <!-- RBAC Permissions -->
+          <div class="perms-section">
+            <div class="perms-title">Permissions (based on role)</div>
+            <div class="perms-grid" id="detail-perms-grid"></div>
+          </div>
+
+          <!-- Quick Actions -->
+          <div class="quick-actions">
+            <div class="quick-actions-title">Quick Actions</div>
+            <div class="quick-actions-grid">
+              <button class="quick-btn" onclick="openIncreaseLicenceModal()">
+                <span class="quick-icon">📈</span>
+                <span>Increase Licence Cap</span>
+              </button>
+              <button class="quick-btn" onclick="openChangeRoleModal()">
+                <span class="quick-icon">🛡️</span>
+                <span>Change Role</span>
+              </button>
+              <button class="quick-btn" onclick="rotateSecret()">
+                <span class="quick-icon">🔄</span>
+                <span>Rotate API Secret</span>
+              </button>
+              <button class="quick-btn" onclick="viewAuditLog()">
+                <span class="quick-icon">📋</span>
+                <span>View Audit Log</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Audit Log Table (shown after clicking audit log) -->
+          <div id="audit-log-section" style="display:none; margin-top:1.5rem;">
+            <div class="section-title">Audit Log</div>
+            <div id="audit-log-container"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== CREATE CHANNEL PARTNER MODAL ===== -->
+  <div class="modal-overlay" id="create-modal" onclick="closeModal('create-modal')">
+    <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h3 class="modal-title">➕ Add Channel Partner</h3>
+        <button class="modal-close" onclick="closeModal('create-modal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="form-label">Company Name *</label>
+          <input type="text" id="cr-company" class="form-input" placeholder="e.g. Acme Solutions Pvt Ltd">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Contact Person Name *</label>
+          <input type="text" id="cr-contact" class="form-input" placeholder="e.g. Rahul Sharma">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Contact Email *</label>
+          <input type="email" id="cr-email" class="form-input" placeholder="e.g. rahul@acmesolutions.com">
+          <div class="form-hint">Partner uses this email to login to their portal</div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Maximum Licence Cap *</label>
+          <input type="number" id="cr-cap" class="form-input" placeholder="e.g. 500" min="1" value="100">
+          <div class="form-hint">Maximum number of licences this partner can provision in total</div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Access Method *</label>
+          <div class="access-method-chips" id="cr-access-methods">
+            <button type="button" class="method-chip" data-method="CSV" onclick="toggleMethod(this)">
+              <span class="method-icon">📄</span>
+              <span class="method-label">CSV Upload</span>
+              <span class="method-desc">Upload bulk CSV files</span>
+            </button>
+            <button type="button" class="method-chip" data-method="MANUAL" onclick="toggleMethod(this)">
+              <span class="method-icon">✍️</span>
+              <span class="method-label">Manual</span>
+              <span class="method-desc">Admin provisions on their behalf</span>
+            </button>
+            <button type="button" class="method-chip selected" data-method="API" onclick="toggleMethod(this)">
+              <span class="method-icon">⚡</span>
+              <span class="method-label">API</span>
+              <span class="method-desc">Direct API integration</span>
+            </button>
+          </div>
+          <div class="form-hint">Select all access methods. Partners with CSV or API get login credentials.</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('create-modal')">Cancel</button>
+        <button class="btn btn-primary" onclick="createReseller()">Create Channel Partner</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== CREDENTIALS MODAL (shown after creation) ===== -->
+  <div class="modal-overlay" id="creds-modal">
+    <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h3 class="modal-title">🔑 Reseller Credentials</h3>
+      </div>
+      <div class="modal-body">
+        <div class="creds-warning">
+          ⚠️ <strong>Save these credentials now.</strong> The Client Secret will never be shown again.
+        </div>
+        <div class="form-group">
+          <label class="form-label">Client ID (Reseller ID)</label>
+          <div class="creds-field">
+            <input type="text" id="creds-client-id" class="form-input mono" readonly>
+            <button class="copy-btn" onclick="copyField('creds-client-id')">📋</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Client Secret</label>
+          <div class="creds-field">
+            <input type="text" id="creds-client-secret" class="form-input mono" readonly>
+            <button class="copy-btn" onclick="copyField('creds-client-secret')">📋</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Token Endpoint (share with reseller)</label>
+          <div class="creds-field">
+            <input type="text" id="creds-token-url" class="form-input mono" readonly>
+            <button class="copy-btn" onclick="copyField('creds-token-url')">📋</button>
+          </div>
+        </div>
+        <div class="creds-instructions">
+          <strong>How the reseller uses this:</strong>
+          <pre id="creds-code-sample" class="code-block"></pre>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-primary" onclick="closeModal('creds-modal')">I've saved these credentials</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== INCREASE LICENCE MODAL ===== -->
+  <div class="modal-overlay" id="licence-modal" onclick="closeModal('licence-modal')">
+    <div class="modal modal-sm" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h3 class="modal-title">📈 Increase Licence Cap</h3>
+        <button class="modal-close" onclick="closeModal('licence-modal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="form-label">Current Cap</label>
+          <input type="text" id="lm-current" class="form-input" readonly style="opacity:0.6;">
+        </div>
+        <div class="form-group">
+          <label class="form-label">New Maximum Licence Cap *</label>
+          <input type="number" id="lm-new-cap" class="form-input" placeholder="e.g. 1000" min="1">
+          <div class="form-hint">Must be equal to or greater than current used count</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('licence-modal')">Cancel</button>
+        <button class="btn btn-primary" onclick="updateLicenceCap()">Update Cap</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== CHANGE ROLE MODAL ===== -->
+  <div class="modal-overlay" id="role-modal" onclick="closeModal('role-modal')">
+    <div class="modal modal-sm" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h3 class="modal-title">🛡️ Change RBAC Role</h3>
+        <button class="modal-close" onclick="closeModal('role-modal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="form-label">New Role *</label>
+          <select id="rm-role" class="form-input" onchange="updateChangeRolePreview()">
+            <option value="RESELLER_FULL">RESELLER_FULL — Can provision + view</option>
+            <option value="RESELLER_READONLY">RESELLER_READONLY — View only</option>
+          </select>
+        </div>
+        <div class="role-preview" id="role-change-preview">
+          <div class="role-preview-title">New permissions:</div>
+          <div id="role-change-perms"></div>
+        </div>
+        <div class="form-hint" style="margin-top:0.5rem;">
+          ⚠️ Role change takes effect immediately on the next API call.
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('role-modal')">Cancel</button>
+        <button class="btn btn-primary" onclick="changeRole()">Update Role</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== EDIT RESELLER MODAL ===== -->
+  <div class="modal-overlay" id="edit-modal" onclick="closeModal('edit-modal')">
+    <div class="modal modal-sm" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <h3 class="modal-title">✏️ Edit Reseller</h3>
+        <button class="modal-close" onclick="closeModal('edit-modal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="form-label">Company Name</label>
+          <input type="text" id="em-company" class="form-input" readonly style="opacity:0.6;">
+        </div>
+        <div class="form-group">
+          <label class="form-label">New Licence Cap</label>
+          <input type="number" id="em-cap" class="form-input" min="1">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Role</label>
+          <select id="em-role" class="form-input">
+            <option value="RESELLER_FULL">RESELLER_FULL</option>
+            <option value="RESELLER_READONLY">RESELLER_READONLY</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Status</label>
+          <select id="em-status" class="form-input">
+            <option value="ACTIVE">ACTIVE</option>
+            <option value="SUSPENDED">SUSPENDED</option>
+          </select>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('edit-modal')">Cancel</button>
+        <button class="btn btn-primary" onclick="saveEdit()">Save Changes</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== TOAST NOTIFICATION ===== -->
+  <div id="toast" class="toast"></div>
+
+  <script src="/static/js/reseller-admin.js"></script>
+</body>
+</html>

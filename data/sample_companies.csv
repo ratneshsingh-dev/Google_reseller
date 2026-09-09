@@ -1,0 +1,6 @@
+company_name,primary_domain,alternate_email,contact_name,address_line1,locality,region,postal_code,country_code,plan,sku_id,license_count,initiated_by_email,econz_notification_email,first_name,last_name,personal_email
+Alpha Systems Pvt Ltd,alpha-systems.com,admin@alpha-alt.com,Alice Smith,100 MG Road,Bengaluru,KA,560001,IN,FLEXIBLE,SKU-BUSINESS-STANDARD,5,alice@alpha-alt.com,econz@example.net,Alice,Smith,alice.s@gmail.com
+Alpha Systems Pvt Ltd,alpha-systems.com,admin@alpha-alt.com,Alice Smith,100 MG Road,Bengaluru,KA,560001,IN,FLEXIBLE,SKU-BUSINESS-STANDARD,5,alice@alpha-alt.com,econz@example.net,Bob,Jones,bob.j@gmail.com
+Alpha Systems Pvt Ltd,alpha-systems.com,admin@alpha-alt.com,Alice Smith,100 MG Road,Bengaluru,KA,560001,IN,FLEXIBLE,SKU-BUSINESS-STANDARD,5,alice@alpha-alt.com,econz@example.net,Charlie,Brown,charlie.b@gmail.com
+Alpha Systems Pvt Ltd,alpha-systems.com,admin@alpha-alt.com,Alice Smith,100 MG Road,Bengaluru,KA,560001,IN,FLEXIBLE,SKU-BUSINESS-STANDARD,5,alice@alpha-alt.com,econz@example.net,Diana,Prince,diana.p@gmail.com
+Alpha Systems Pvt Ltd,alpha-systems.com,admin@alpha-alt.com,Alice Smith,100 MG Road,Bengaluru,KA,560001,IN,FLEXIBLE,SKU-BUSINESS-STANDARD,5,alice@alpha-alt.com,econz@example.net,Edward,Norton,edward.n@gmail.com
