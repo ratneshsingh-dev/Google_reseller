@@ -37,11 +37,17 @@ def _build_service(subject: Optional[str] = None):
     subject: email to impersonate via Domain-Wide Delegation.
               Defaults to GOOGLE_ADMIN_EMAIL from .env.
     """
-    creds_file = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "credentials.json")
     admin_email = subject or os.getenv("GOOGLE_ADMIN_EMAIL", "")
-    credentials = service_account.Credentials.from_service_account_file(
-        creds_file, scopes=_SCOPES
-    )
+
+    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON", "")
+    if creds_json:
+        import json
+        info = json.loads(creds_json)
+        credentials = service_account.Credentials.from_service_account_info(info, scopes=_SCOPES)
+    else:
+        creds_file = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "credentials.json")
+        credentials = service_account.Credentials.from_service_account_file(creds_file, scopes=_SCOPES)
+
     delegated = credentials.with_subject(admin_email)
     return build("admin", "directory_v1", credentials=delegated, cache_discovery=False)
 

@@ -24,13 +24,19 @@ class GmailEmailService(EmailService):
     """Real Gmail API email service using DWD."""
 
     def __init__(self) -> None:
-        credentials_file = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "credentials.json")
         self._admin_email = os.getenv("GOOGLE_ADMIN_EMAIL", "")
 
-        credentials = service_account.Credentials.from_service_account_file(
-            credentials_file,
-            scopes=_SCOPES,
-        )
+        creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON", "")
+        if creds_json:
+            import json
+            info = json.loads(creds_json)
+            credentials = service_account.Credentials.from_service_account_info(info, scopes=_SCOPES)
+        else:
+            credentials_file = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "credentials.json")
+            credentials = service_account.Credentials.from_service_account_file(
+                credentials_file, scopes=_SCOPES
+            )
+
         # Impersonate the admin email via Domain-Wide Delegation
         delegated_credentials = credentials.with_subject(self._admin_email)
         self._service = build(
