@@ -34,11 +34,22 @@ _SCOPES = ["https://www.googleapis.com/auth/apps.order"]
 
 
 def _build_service():
-    creds_file = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "credentials.json")
     admin_email = os.getenv("GOOGLE_ADMIN_EMAIL", "")
-    credentials = service_account.Credentials.from_service_account_file(
-        creds_file, scopes=_SCOPES
-    )
+
+    # On Cloud Run: load credentials from GOOGLE_CREDENTIALS_JSON env var (JSON string)
+    # Locally: fall back to credentials.json file
+    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON", "")
+    if creds_json:
+        import json
+        from google.oauth2 import service_account as sa
+        info = json.loads(creds_json)
+        credentials = sa.Credentials.from_service_account_info(info, scopes=_SCOPES)
+    else:
+        creds_file = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "credentials.json")
+        credentials = service_account.Credentials.from_service_account_file(
+            creds_file, scopes=_SCOPES
+        )
+
     # Impersonate the Workspace admin via Domain-Wide Delegation
     # The raw service account is not authorized as a reseller — the admin is
     delegated = credentials.with_subject(admin_email)
