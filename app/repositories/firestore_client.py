@@ -200,20 +200,26 @@ class FirestoreStore(BaseStore):
             f"https://firestore.googleapis.com/v1/projects/{self._project}"
             f"/databases/{self._database}/documents"
         )
-        # Explicitly load credentials from GOOGLE_APPLICATION_CREDENTIALS
-        # (bypasses system-level env var that may point to a different project)
+        # On Cloud Run: load credentials from GOOGLE_CREDENTIALS_JSON env var (JSON string)
+        # Locally: fall back to credentials.json file, then ADC.
+        import json
         import os
-        creds_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "credentials.json")
-        try:
-            self._credentials = service_account.Credentials.from_service_account_file(
-                creds_file,
-                scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+        creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
+        if creds_json:
+            info = json.loads(creds_json)
+            self._credentials = service_account.Credentials.from_service_account_info(
+                info, scopes=scopes
             )
-        except Exception:
-            # Fallback to ADC if service account file not found/invalid
-            self._credentials, _ = google.auth.default(
-                scopes=["https://www.googleapis.com/auth/cloud-platform"]
-            )
+        else:
+            creds_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "credentials.json")
+            try:
+                self._credentials = service_account.Credentials.from_service_account_file(
+                    creds_file, scopes=scopes
+                )
+            except Exception:
+                # Fallback to ADC if service account file not found/invalid
+                self._credentials, _ = google.auth.default(scopes=scopes)
         self._auth_req = google.auth.transport.requests.Request()
         self._lock = threading.Lock()
         logger.info(
