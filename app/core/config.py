@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     # --- Admin whitelist (emails that can access /api/v1/admin/*) ---
     admin_emails: str = '["ratnesh.s@econz.net", "Admin@supportnation.co.in"]'
 
+    # --- Dev-only login bypass (POST /api/v1/auth/dev-login) ---
+    # Must be explicitly enabled for local development. Never set this in
+    # Cloud Run — it logs the caller in as an admin with no credentials.
+    enable_dev_login: bool = False
+
     @property
     def cors_origin_list(self) -> List[str]:
         """Parse CORS origins from JSON string."""

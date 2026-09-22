@@ -113,3 +113,44 @@ def get_token_expires_in_seconds() -> int:
     """Return the access token lifetime in seconds."""
     settings = get_settings()
     return settings.jwt_access_token_expire_hours * 3600
+
+
+# ---------------------------------------------------------------------------
+# Admin session tokens (signed cookie for the Admin Panel)
+# ---------------------------------------------------------------------------
+
+ADMIN_SESSION_MAX_AGE_SECONDS = 86400  # 24 hours
+
+
+def create_admin_session_token(email: str) -> str:
+    """Create a signed JWT for the admin panel session cookie.
+
+    The cookie stores this token (not a raw email) so it cannot be
+    forged by simply setting a cookie value in the browser — the
+    signature is verified server-side on every admin request.
+    """
+    settings = get_settings()
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(seconds=ADMIN_SESSION_MAX_AGE_SECONDS)
+
+    payload: Dict[str, Any] = {
+        "sub": email,
+        "type": "admin_session",
+        "iat": int(now.timestamp()),
+        "exp": int(expire.timestamp()),
+    }
+    return jwt.encode(payload, settings.jwt_secret_key, algorithm="HS256")
+
+
+def decode_admin_session_token(token: str) -> str:
+    """Decode and verify an admin session token, returning the email.
+
+    Raises:
+        jwt.ExpiredSignatureError — session expired
+        jwt.InvalidTokenError     — token missing, malformed, or forged
+    """
+    settings = get_settings()
+    payload = jwt.decode(token, settings.jwt_secret_key, algorithms=["HS256"])
+    if payload.get("type") != "admin_session" or not payload.get("sub"):
+        raise jwt.InvalidTokenError("Not a valid admin session token.")
+    return payload["sub"]

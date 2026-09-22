@@ -7,10 +7,12 @@ session cookies so the logged-in user's email is available for notifications.
 
 from __future__ import annotations
 
+import jwt
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from app.core.config import get_settings
+from app.core.jwt_service import create_admin_session_token, decode_admin_session_token
 from app.core.logging import get_logger
 from app.core.rate_limit import limiter
 
@@ -122,10 +124,11 @@ async def google_login(request: Request, body: GoogleLoginRequest, response: Res
     # Store session keyed by email
     _sessions[user.email] = user
 
-    # Set a simple session cookie
+    # Set a signed session cookie — the value is a JWT, not a raw email,
+    # so it cannot be forged by setting a cookie value in the browser.
     response.set_cookie(
         key="session_user",
-        value=user.email,
+        value=create_admin_session_token(user.email),
         httponly=True,
         samesite="lax",
         max_age=86400,  # 24 hours
@@ -138,19 +141,33 @@ async def google_login(request: Request, body: GoogleLoginRequest, response: Res
 @router.get("/me", response_model=UserInfo)
 async def get_current_user(request: Request):
     """Return the currently logged-in user from the session cookie."""
-    session_email = request.cookies.get("session_user")
-    if not session_email or session_email not in _sessions:
+    token = request.cookies.get("session_user")
+    if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        session_email = decode_admin_session_token(token)
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    if session_email not in _sessions:
+        _sessions[session_email] = UserInfo(
+            email=session_email, name=session_email.split("@")[0]
+        )
     return _sessions[session_email]
 
 
 @router.post("/logout")
 async def logout(request: Request, response: Response):
     """Clear the session cookie and remove the session."""
-    session_email = request.cookies.get("session_user")
-    if session_email and session_email in _sessions:
-        del _sessions[session_email]
-        logger.info("user_logged_out", email=session_email)
+    token = request.cookies.get("session_user")
+    if token:
+        try:
+            session_email = decode_admin_session_token(token)
+            if session_email in _sessions:
+                del _sessions[session_email]
+                logger.info("user_logged_out", email=session_email)
+        except jwt.InvalidTokenError:
+            pass
 
     response.delete_cookie("session_user")
     return {"message": "Logged out successfully"}
@@ -172,8 +189,16 @@ async def get_auth_config():
 
 @router.post("/dev-login")
 async def dev_login(response: Response):
-    """Bypass Google login for local development. Logs in as the first admin."""
+    """Bypass Google login for local development. Logs in as the first admin.
+
+    Disabled unless ENABLE_DEV_LOGIN=true is explicitly set — must never be
+    enabled in a deployed environment, since it grants admin access with
+    zero credentials.
+    """
     settings = get_settings()
+    if not settings.enable_dev_login:
+        raise HTTPException(status_code=404, detail="Not found")
+
     # Default to ratnesh.s@econz.net if available, or first admin
     admin_email = "ratnesh.s@econz.net"
     if settings.admin_email_list and admin_email not in settings.admin_email_list:
@@ -190,7 +215,7 @@ async def dev_login(response: Response):
 
     response.set_cookie(
         key="session_user",
-        value=user.email,
+        value=create_admin_session_token(user.email),
         httponly=True,
         samesite="lax",
         max_age=86400,

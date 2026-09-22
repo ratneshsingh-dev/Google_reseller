@@ -142,25 +142,38 @@ async def require_reseller_token(
 
 
 async def require_admin(request: Request) -> dict:
-    """FastAPI dependency: authenticate admin via Google OAuth session cookie.
+    """FastAPI dependency: authenticate admin via a signed session cookie.
+
+    The `session_user` cookie holds a signed JWT (not a raw email) so it
+    cannot be forged by simply setting a cookie value — the signature is
+    verified here before the email inside it is trusted at all.
 
     Checks that the logged-in user's email is in:
       1. The admin_emails env var whitelist (always works), OR
       2. The Firestore admin_users collection (dynamic, no redeployment needed)
 
     Raises:
-        401 — not logged in (no cookie at all)
+        401 — not logged in (no cookie, or cookie is invalid/expired)
         403 — logged in but not an admin
     """
     from app.api.routes.auth import _sessions, UserInfo
     from app.core.config import get_settings
+    from app.core.jwt_service import decode_admin_session_token
     from app.dependencies import get_admin_repo
 
-    session_email = request.cookies.get("session_user")
-    if not session_email:
+    token = request.cookies.get("session_user")
+    if not token:
         raise HTTPException(
             status_code=401,
             detail="Not authenticated. Please login via the admin panel.",
+        )
+
+    try:
+        session_email = decode_admin_session_token(token)
+    except Exception:
+        raise HTTPException(
+            status_code=401,
+            detail="Session invalid or expired. Please login again.",
         )
 
     settings = get_settings()
