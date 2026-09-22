@@ -48,6 +48,9 @@
           <img id="user-avatar" src="" alt="avatar" class="user-avatar">
           <span id="user-display-name" class="user-name"></span>
         </div>
+        <button class="btn btn-secondary" id="btn-manage-admins" onclick="openAdminUsersModal()" style="padding:0.35rem 0.8rem;font-size:0.8rem;display:none;">
+          👥 Manage Admins
+        </button>
         <a href="/static/index.html" class="btn btn-secondary" style="padding:0.35rem 0.8rem;font-size:0.8rem;">
           ← Main Panel
         </a>
@@ -419,6 +422,46 @@
       <div class="modal-footer">
         <button class="btn btn-secondary" onclick="closeModal('edit-modal')">Cancel</button>
         <button class="btn btn-primary" onclick="saveEdit()">Save Changes</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== ADMIN USERS MODAL ===== -->
+  <div class="modal-overlay" id="admin-users-modal" onclick="closeModal('admin-users-modal')">
+    <div class="modal" onclick="event.stopPropagation()" style="max-width:560px;">
+      <div class="modal-header">
+        <h3 class="modal-title">👥 Manage Admin Users</h3>
+        <button class="modal-close" onclick="closeModal('admin-users-modal')">✕</button>
+      </div>
+      <div class="modal-body">
+        <p style="color:var(--text-secondary);font-size:0.85rem;margin-bottom:1.2rem;">
+          Admin users can log in to this panel. Only <strong>superadmins</strong> can add or remove admins.
+        </p>
+
+        <!-- Add Admin Form -->
+        <div id="add-admin-form" style="background:var(--surface-2,#1e2433);border-radius:10px;padding:1rem;margin-bottom:1.2rem;">
+          <div style="font-size:0.85rem;font-weight:600;color:var(--text-primary);margin-bottom:0.75rem;">➕ Add New Admin</div>
+          <div style="display:flex;gap:0.5rem;align-items:flex-end;">
+            <div style="flex:1;">
+              <label class="form-label" style="font-size:0.78rem;">Email Address *</label>
+              <input type="email" id="new-admin-email" class="form-input" placeholder="e.g. someone@econz.net" style="font-size:0.85rem;">
+            </div>
+            <div style="flex:1;">
+              <label class="form-label" style="font-size:0.78rem;">Name (optional)</label>
+              <input type="text" id="new-admin-name" class="form-input" placeholder="e.g. Ravi Kumar" style="font-size:0.85rem;">
+            </div>
+            <button class="btn btn-primary" onclick="addAdminUser()" style="padding:0.5rem 1rem;font-size:0.82rem;white-space:nowrap;">Add Admin</button>
+          </div>
+        </div>
+
+        <!-- Current Admins List -->
+        <div style="font-size:0.85rem;font-weight:600;color:var(--text-primary);margin-bottom:0.5rem;">Current Admins</div>
+        <div id="admin-users-list" style="max-height:280px;overflow-y:auto;">
+          <div style="color:var(--text-muted);text-align:center;padding:1.5rem;">Loading...</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('admin-users-modal')">Close</button>
       </div>
     </div>
   </div>

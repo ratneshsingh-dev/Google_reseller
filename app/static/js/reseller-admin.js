@@ -131,6 +131,8 @@ function onLoginSuccess(userData) {
     avatar.src = userData.picture;
     avatar.style.display = 'block';
   }
+  // Show 'Manage Admins' button only for superadmins — we check after dashboard loads
+  checkIfSuperAdmin();
   loadDashboard();
 }
 
@@ -731,3 +733,93 @@ window.addEventListener('DOMContentLoaded', () => {
   updateRolePreview();
   updateChangeRolePreview();
 });
+
+
+// ---------------------------------------------------------------------------
+// Admin User Management
+// ---------------------------------------------------------------------------
+
+async function checkIfSuperAdmin() {
+  // Try to list admins — only superadmins can do this without a 403
+  try {
+    const res = await apiFetch('/admins');
+    if (res && !res.error) {
+      const btn = document.getElementById('btn-manage-admins');
+      if (btn) btn.style.display = 'inline-flex';
+    }
+  } catch (_) {}
+}
+
+async function openAdminUsersModal() {
+  document.getElementById('admin-users-modal').classList.add('active');
+  await loadAdminUsers();
+}
+
+async function loadAdminUsers() {
+  const container = document.getElementById('admin-users-list');
+  container.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:1.5rem;">Loading...</div>';
+  try {
+    const data = await apiFetch('/admins');
+    if (!data || !data.admins || data.admins.length === 0) {
+      container.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:1.5rem;">No admins found.</div>';
+      return;
+    }
+    container.innerHTML = data.admins.map(a => `
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:0.65rem 0.75rem;border-radius:8px;margin-bottom:0.4rem;background:var(--surface-2,#1e2433);">
+        <div>
+          <div style="font-weight:600;font-size:0.88rem;color:var(--text-primary);">${a.email}</div>
+          <div style="font-size:0.75rem;color:var(--text-muted);margin-top:0.1rem;">
+            ${a.name || ''}
+            <span style="margin-left:0.5rem;padding:0.1rem 0.45rem;border-radius:4px;font-size:0.7rem;background:${a.source==='config'?'rgba(99,102,241,0.2)':'rgba(16,185,129,0.15)'};color:${a.source==='config'?'#818cf8':'#34d399'};">${a.source === 'config' ? 'Superadmin' : 'Admin'}</span>
+            ${a.added_by && a.added_by !== 'system' ? `<span style="margin-left:0.3rem;">· Added by ${a.added_by}</span>` : ''}
+          </div>
+        </div>
+        ${a.source !== 'config' ? `
+        <button onclick="removeAdminUser('${a.email}')" style="background:rgba(239,68,68,0.15);border:1px solid rgba(239,68,68,0.3);color:#fca5a5;padding:0.3rem 0.7rem;border-radius:6px;font-size:0.78rem;cursor:pointer;" onmouseover="this.style.background='rgba(239,68,68,0.3)'" onmouseout="this.style.background='rgba(239,68,68,0.15)'">
+          Remove
+        </button>` : '<span style="font-size:0.75rem;color:var(--text-muted);">Protected</span>'}
+      </div>
+    `).join('');
+  } catch (err) {
+    container.innerHTML = `<div style="color:#fca5a5;text-align:center;padding:1rem;">Failed to load admins: ${err.message}</div>`;
+  }
+}
+
+async function addAdminUser() {
+  const email = document.getElementById('new-admin-email').value.trim();
+  const name  = document.getElementById('new-admin-name').value.trim();
+  if (!email) { showToast('Please enter an email address', 'error'); return; }
+
+  try {
+    const res = await fetch(`${API_BASE}/admins`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ email, name }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Failed to add admin');
+    showToast(`${email} has been added as admin`, 'success');
+    document.getElementById('new-admin-email').value = '';
+    document.getElementById('new-admin-name').value = '';
+    await loadAdminUsers();
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
+
+async function removeAdminUser(email) {
+  if (!confirm(`Remove admin access for ${email}?`)) return;
+  try {
+    const res = await fetch(`${API_BASE}/admins/${encodeURIComponent(email)}`, {
+      method: 'DELETE',
+      credentials: 'include',
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || 'Failed to remove admin');
+    showToast(`${email} removed from admin access`, 'success');
+    await loadAdminUsers();
+  } catch (err) {
+    showToast(err.message, 'error');
+  }
+}
