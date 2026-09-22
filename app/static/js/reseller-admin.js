@@ -742,12 +742,14 @@ window.addEventListener('DOMContentLoaded', () => {
 async function checkIfSuperAdmin() {
   // Try to list admins — only superadmins can do this without a 403
   try {
-    const res = await apiFetch('/admins');
-    if (res && !res.error) {
+    const data = await apiGet('/admins');
+    if (data && data.admins) {
       const btn = document.getElementById('btn-manage-admins');
       if (btn) btn.style.display = 'inline-flex';
     }
-  } catch (_) {}
+  } catch (_) {
+    // Not a superadmin — button stays hidden
+  }
 }
 
 async function openAdminUsersModal() {
@@ -759,7 +761,7 @@ async function loadAdminUsers() {
   const container = document.getElementById('admin-users-list');
   container.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:1.5rem;">Loading...</div>';
   try {
-    const data = await apiFetch('/admins');
+    const data = await apiGet('/admins');
     if (!data || !data.admins || data.admins.length === 0) {
       container.innerHTML = '<div style="color:var(--text-muted);text-align:center;padding:1.5rem;">No admins found.</div>';
       return;
