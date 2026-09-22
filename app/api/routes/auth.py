@@ -92,7 +92,17 @@ async def google_login(request: Request, body: GoogleLoginRequest, response: Res
 
     # Enforce admin whitelist — reject non-admin emails
     settings = get_settings()
-    if email not in settings.admin_email_list:
+    is_admin = email in settings.admin_email_list
+
+    if not is_admin:
+        try:
+            from app.dependencies import get_admin_repo
+            admin_repo = get_admin_repo()
+            is_admin = admin_repo.exists(email)
+        except Exception as e:
+            logger.error("firestore_admin_check_failed", error=str(e))
+
+    if not is_admin:
         logger.warning("admin_login_rejected", email=email)
         raise HTTPException(
             status_code=403,
