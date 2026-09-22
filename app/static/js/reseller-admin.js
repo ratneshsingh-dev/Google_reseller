@@ -753,7 +753,7 @@ async function checkIfSuperAdmin() {
 }
 
 async function openAdminUsersModal() {
-  document.getElementById('admin-users-modal').classList.add('active');
+  openModal('admin-users-modal');
   await loadAdminUsers();
 }
 
