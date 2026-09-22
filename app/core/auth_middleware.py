@@ -144,9 +144,9 @@ async def require_reseller_token(
 async def require_admin(request: Request) -> dict:
     """FastAPI dependency: authenticate admin via Google OAuth session cookie.
 
-    Checks that the logged-in user's email is in the admin_emails whitelist.
-    If server was restarted and in-memory session is gone, we still trust the
-    cookie email as long as it is in the admin whitelist.
+    Checks that the logged-in user's email is in:
+      1. The admin_emails env var whitelist (always works), OR
+      2. The Firestore admin_users collection (dynamic, no redeployment needed)
 
     Raises:
         401 — not logged in (no cookie at all)
@@ -154,6 +154,7 @@ async def require_admin(request: Request) -> dict:
     """
     from app.api.routes.auth import _sessions, UserInfo
     from app.core.config import get_settings
+    from app.dependencies import get_admin_repo
 
     session_email = request.cookies.get("session_user")
     if not session_email:
@@ -163,8 +164,20 @@ async def require_admin(request: Request) -> dict:
         )
 
     settings = get_settings()
-    # Check admin whitelist first (works even after server restart)
-    if session_email.lower() not in settings.admin_email_list:
+    email_lower = session_email.lower()
+
+    # Check 1: static env var whitelist
+    is_admin = email_lower in settings.admin_email_list
+
+    # Check 2: dynamic Firestore admin_users collection
+    if not is_admin:
+        try:
+            admin_repo = get_admin_repo()
+            is_admin = admin_repo.exists(email_lower)
+        except Exception:
+            pass  # If Firestore check fails, fall through to deny
+
+    if not is_admin:
         raise HTTPException(
             status_code=403,
             detail=f"Access denied. {session_email} is not an admin.",

@@ -38,6 +38,7 @@ from app.models.reseller_models import (
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.firestore_client import get_store
 from app.repositories.reseller_repository import ResellerRepository
+from app.repositories.admin_repository import AdminRepository
 
 logger = get_logger(__name__)
 
@@ -420,3 +421,86 @@ async def dashboard_summary(admin=Depends(require_admin)) -> DashboardSummaryRes
         overall_utilization_percent=utilization,
         resellers=[_to_response(r) for r in resellers],
     )
+
+
+# ---------------------------------------------------------------------------
+# Admin User Management Routes
+# ---------------------------------------------------------------------------
+
+
+@router.get("/admins", summary="List all admin users")
+async def list_admins(admin=Depends(require_admin)):
+    """List all admin users who have access to this panel."""
+    from app.core.config import get_settings
+    settings = get_settings()
+    admin_repo = AdminRepository(get_store())
+
+    # Combine env var admins + Firestore admins
+    env_admins = [{
+        "email": e,
+        "name": e.split("@")[0],
+        "source": "config",
+        "added_by": "system",
+        "is_active": True,
+    } for e in settings.admin_email_list]
+
+    firestore_admins = [{
+        "email": a.email,
+        "name": a.name,
+        "source": "firestore",
+        "added_by": a.added_by,
+        "is_active": a.is_active,
+    } for a in admin_repo.get_all_active()]
+
+    # Merge — avoid duplicates
+    env_emails = {a["email"] for a in env_admins}
+    merged = env_admins + [a for a in firestore_admins if a["email"] not in env_emails]
+    return {"admins": merged, "total": len(merged)}
+
+
+@router.post("/admins", summary="Add a new admin user", status_code=201)
+async def add_admin(request: Request, admin=Depends(require_admin)):
+    """Add a new admin email. They can sign in via Google OAuth immediately."""
+    body = await request.json()
+    email = body.get("email", "").strip().lower()
+    name = body.get("name", "").strip()
+
+    if not email or "@" not in email:
+        raise HTTPException(status_code=422, detail="Valid email is required.")
+
+    admin_repo = AdminRepository(get_store())
+    added_by = admin.get("email", "unknown") if isinstance(admin, dict) else getattr(admin, "email", "unknown")
+    doc = admin_repo.add(email=email, name=name, added_by=added_by)
+
+    logger.info("admin_user_added", email=email, by=added_by)
+    return {
+        "message": f"{email} has been added as an admin.",
+        "email": doc.email,
+        "name": doc.name,
+        "added_by": doc.added_by,
+    }
+
+
+@router.delete("/admins/{email}", summary="Remove an admin user")
+async def remove_admin(email: str, admin=Depends(require_admin)):
+    """Remove admin access for an email. They will no longer be able to log in."""
+    from app.core.config import get_settings
+    settings = get_settings()
+    email = email.strip().lower()
+
+    # Prevent removing env var admins (they're hardcoded)
+    if email in settings.admin_email_list:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{email} is a system admin configured in environment variables and cannot be removed here."
+        )
+
+    removed_by = admin.get("email", "unknown") if isinstance(admin, dict) else getattr(admin, "email", "unknown")
+    admin_repo = AdminRepository(get_store())
+    success = admin_repo.remove(email=email, removed_by=removed_by)
+
+    if not success:
+        raise HTTPException(status_code=404, detail=f"{email} was not found in the admin list.")
+
+    logger.info("admin_user_removed", email=email, by=removed_by)
+    return {"message": f"{email} has been removed from admin access."}

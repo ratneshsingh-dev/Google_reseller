@@ -18,6 +18,7 @@ from app.repositories.audit_repository import AuditRepository
 from app.repositories.company_repository import CompanyRepository
 from app.repositories.employee_repository import EmployeeRepository
 from app.repositories.firestore_client import get_store
+from app.repositories.admin_repository import AdminRepository
 from app.repositories.job_repository import JobRepository
 from app.repositories.notification_repository import NotificationRepository
 from app.repositories.reseller_repository import ResellerRepository
@@ -114,6 +115,11 @@ def get_reseller_repo() -> ResellerRepository:
 @lru_cache()
 def get_audit_repo() -> AuditRepository:
     return AuditRepository(get_store())
+
+
+@lru_cache()
+def get_admin_repo() -> AdminRepository:
+    return AdminRepository(get_store())
 
 
 # ---------------------------------------------------------------------------
