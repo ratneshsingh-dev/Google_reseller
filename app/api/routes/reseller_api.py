@@ -184,9 +184,6 @@ async def reseller_provision(
         )
     )
 
-    # Increment licence counter immediately (optimistic)
-    reseller_repo.increment_licences_used(reseller.reseller_id, request_body.license_count)
-
     # Audit log
     _log_audit(
         audit_repo,

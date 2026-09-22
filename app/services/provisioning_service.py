@@ -87,6 +87,7 @@ class ProvisioningService:
         employee_repo: EmployeeRepository,
         job_repo: JobRepository,
         notification_repo: NotificationRepository,
+        reseller_repo=None,  # Optional: used to increment licences_used on success only
     ) -> None:
         self._reseller = reseller_service
         self._directory = directory_service
@@ -96,6 +97,7 @@ class ProvisioningService:
         self._employee_repo = employee_repo
         self._job_repo = job_repo
         self._notification_repo = notification_repo
+        self._reseller_repo = reseller_repo
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -207,6 +209,17 @@ class ProvisioningService:
                 sku_id=request.sku_id,
                 licensed_seats=request.license_count,
             )
+
+            # ✅ Increment licence counter ONLY after Google confirms subscription success
+            if reseller_id and self._reseller_repo:
+                self._reseller_repo.increment_licences_used(
+                    reseller_id, request.license_count
+                )
+                logger.info(
+                    "licences_incremented_on_success",
+                    reseller_id=reseller_id,
+                    count=request.license_count,
+                )
 
             # --- Step 4: Create admin user (optional — may fail for new reseller customers) ---
             await self._update_job(job_id, JobStatus.USER_PROVISIONING)

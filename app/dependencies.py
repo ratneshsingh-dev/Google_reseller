@@ -132,6 +132,7 @@ def get_provisioning_service() -> ProvisioningService:
         employee_repo=get_employee_repo(),
         job_repo=get_job_repo(),
         notification_repo=get_notification_repo(),
+        reseller_repo=get_reseller_repo(),
     )
 
 
