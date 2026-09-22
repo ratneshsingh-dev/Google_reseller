@@ -460,7 +460,19 @@ async def list_admins(admin=Depends(require_admin)):
 
 @router.post("/admins", summary="Add a new admin user", status_code=201)
 async def add_admin(request: Request, admin=Depends(require_admin)):
-    """Add a new admin email. They can sign in via Google OAuth immediately."""
+    """Add a new admin email. Only superadmins (env var list) can do this."""
+    from app.core.config import get_settings
+    settings = get_settings()
+
+    caller_email = admin.get("email", "") if isinstance(admin, dict) else getattr(admin, "email", "")
+
+    # Only superadmins (env var list) can grant admin access
+    if caller_email.lower() not in settings.admin_email_list:
+        raise HTTPException(
+            status_code=403,
+            detail="Only superadmins can add new admin users."
+        )
+
     body = await request.json()
     email = body.get("email", "").strip().lower()
     name = body.get("name", "").strip()
@@ -469,10 +481,9 @@ async def add_admin(request: Request, admin=Depends(require_admin)):
         raise HTTPException(status_code=422, detail="Valid email is required.")
 
     admin_repo = AdminRepository(get_store())
-    added_by = admin.get("email", "unknown") if isinstance(admin, dict) else getattr(admin, "email", "unknown")
-    doc = admin_repo.add(email=email, name=name, added_by=added_by)
+    doc = admin_repo.add(email=email, name=name, added_by=caller_email)
 
-    logger.info("admin_user_added", email=email, by=added_by)
+    logger.info("admin_user_added", email=email, by=caller_email)
     return {
         "message": f"{email} has been added as an admin.",
         "email": doc.email,
@@ -483,24 +494,33 @@ async def add_admin(request: Request, admin=Depends(require_admin)):
 
 @router.delete("/admins/{email}", summary="Remove an admin user")
 async def remove_admin(email: str, admin=Depends(require_admin)):
-    """Remove admin access for an email. They will no longer be able to log in."""
+    """Remove admin access for an email. Only superadmins can do this."""
     from app.core.config import get_settings
     settings = get_settings()
+
+    caller_email = admin.get("email", "") if isinstance(admin, dict) else getattr(admin, "email", "")
+
+    # Only superadmins (env var list) can remove admin access
+    if caller_email.lower() not in settings.admin_email_list:
+        raise HTTPException(
+            status_code=403,
+            detail="Only superadmins can remove admin users."
+        )
+
     email = email.strip().lower()
 
-    # Prevent removing env var admins (they're hardcoded)
+    # Prevent removing superadmins (env var hardcoded)
     if email in settings.admin_email_list:
         raise HTTPException(
             status_code=400,
-            detail=f"{email} is a system admin configured in environment variables and cannot be removed here."
+            detail=f"{email} is a superadmin and cannot be removed."
         )
 
-    removed_by = admin.get("email", "unknown") if isinstance(admin, dict) else getattr(admin, "email", "unknown")
     admin_repo = AdminRepository(get_store())
-    success = admin_repo.remove(email=email, removed_by=removed_by)
+    success = admin_repo.remove(email=email, removed_by=caller_email)
 
     if not success:
         raise HTTPException(status_code=404, detail=f"{email} was not found in the admin list.")
 
-    logger.info("admin_user_removed", email=email, by=removed_by)
+    logger.info("admin_user_removed", email=email, by=caller_email)
     return {"message": f"{email} has been removed from admin access."}
