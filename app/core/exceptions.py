@@ -36,6 +36,10 @@ class InsufficientSeatsError(ValidationError):
     """License count is less than employee count."""
 
 
+class SeatReductionNotAllowedError(ValidationError):
+    """Request would lower the licence count of an existing subscription."""
+
+
 # --- Duplicate / Conflict Errors ---
 
 

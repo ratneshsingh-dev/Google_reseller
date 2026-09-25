@@ -27,6 +27,7 @@ from app.core.exceptions import (
     DuplicateEmployeeError,
     InsufficientSeatsError,
     RetryableError,
+    SeatReductionNotAllowedError,
     SubscriptionAlreadyExistsError,
 )
 from app.core.logging import get_logger
@@ -169,7 +170,7 @@ class ProvisioningService:
             await self._update_job(job_id, JobStatus.SUBSCRIPTION_CREATING)
             step_id = await self._start_step(job_id, "CREATE_SUBSCRIPTION")
 
-            subscription = await self._ensure_subscription_with_batching(
+            subscription, seats_added = await self._ensure_subscription_with_batching(
                 google_customer_id, request
             )
             google_sub_id = subscription.subscription_id
@@ -199,7 +200,9 @@ class ProvisioningService:
                 )
 
             await self._complete_step(
-                step_id, f"Subscription: {google_sub_id} | Seats: {request.license_count}"
+                step_id,
+                f"Subscription: {google_sub_id} | Seats: {request.license_count} "
+                f"| Added: {seats_added}",
             )
             await self._update_job(
                 job_id,
@@ -211,14 +214,12 @@ class ProvisioningService:
             )
 
             # ✅ Increment licence counter ONLY after Google confirms subscription success
-            if reseller_id and self._reseller_repo:
-                self._reseller_repo.increment_licences_used(
-                    reseller_id, request.license_count
-                )
+            if reseller_id and self._reseller_repo and seats_added > 0:
+                self._reseller_repo.increment_licences_used(reseller_id, seats_added)
                 logger.info(
                     "licences_incremented_on_success",
                     reseller_id=reseller_id,
-                    count=request.license_count,
+                    count=seats_added,
                 )
 
             # --- Step 4: Create admin user (optional — may fail for new reseller customers) ---
@@ -377,27 +378,35 @@ class ProvisioningService:
         Google's Reseller API limits seats per call to ~100.
         We create the subscription with up to 100 seats, then use
         changeSeats() to scale up in increments until we reach the target.
-        """
-        from app.models.google_api import GoogleChangSeatsRequest
 
+        Returns (subscription, seats_added). license_count is the desired total;
+        an existing subscription can only grow, never shrink.
+        """
         total_needed = request.license_count
 
         # Check existing subscriptions first (idempotent)
         existing_subs = await self._reseller.list_subscriptions(customer_id)
         for sub in existing_subs:
             if sub.sku_id == request.sku_id:
+                current = sub.seats.number_of_seats
                 logger.info(
                     "subscription_already_exists",
                     subscription_id=sub.subscription_id,
                     sku_id=request.sku_id,
+                    current_seats=current,
+                    requested_seats=total_needed,
                 )
-                # Scale up if needed
-                current = sub.seats.number_of_seats
-                if current < total_needed:
+                if total_needed < current:
+                    raise SeatReductionNotAllowedError(
+                        f"{request.primary_domain} already has {current} licences. "
+                        f"Licence count cannot be reduced (requested {total_needed}). "
+                        f"To add licences, send a license_count greater than {current}."
+                    )
+                if total_needed > current:
                     sub = await self._scale_seats(
                         customer_id, sub.subscription_id, current, total_needed
                     )
-                return sub
+                return sub, total_needed - current
 
         # Create new subscription with first batch (max 100)
         initial_batch = min(total_needed, GOOGLE_MAX_SEATS_PER_CALL)
@@ -433,7 +442,7 @@ class ProvisioningService:
                 customer_id, subscription.subscription_id, current_seats, total_needed
             )
 
-        return subscription
+        return subscription, total_needed
 
     async def _scale_seats(
         self,

@@ -93,7 +93,11 @@ def _parse_subscription(resp: dict) -> GoogleSubscription:
             isCommitmentPlan=plan.get("isCommitmentPlan", False),
         ),
         seats=GoogleSubscriptionSeats(
-            numberOfSeats=seats.get("numberOfSeats", 0),
+            # Annual plans report numberOfSeats; TRIAL/FLEXIBLE report maximumNumberOfSeats.
+            numberOfSeats=max(
+                seats.get("numberOfSeats", 0) or 0,
+                seats.get("maximumNumberOfSeats", 0) or 0,
+            ),
             licensedNumberOfSeats=seats.get("licensedNumberOfSeats", 0),
         ),
     )

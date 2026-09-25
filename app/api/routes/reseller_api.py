@@ -237,7 +237,6 @@ async def reseller_provision_csv(
     ip = request.client.host if request.client else ""
     audit_repo = get_audit_repo()
     job_repo = get_job_repo()
-    reseller_repo = get_reseller_repo()
 
     if not file.filename or not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Uploaded file must be a .csv file.")
@@ -312,8 +311,6 @@ async def reseller_provision_csv(
         req,
         reseller_id=reseller.reseller_id,
     )
-
-    reseller_repo.increment_licences_used(reseller.reseller_id, final_licence_count)
 
     _log_audit(
         audit_repo,
