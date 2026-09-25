@@ -137,6 +137,7 @@ async def provision_csv(
     admin_first_name: Optional[str] = Form(None),
     admin_last_name: Optional[str] = Form(None),
     admin_recovery_email: Optional[str] = Form(None),
+    admin_username: Optional[str] = Form(None),
     initiated_by_email: Optional[str] = Form(None),
     econz_notification_email: Optional[str] = Form(None),
     idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
@@ -215,6 +216,7 @@ async def provision_csv(
             admin_first_name=final_admin_first,
             admin_last_name=final_admin_last,
             admin_recovery_email=admin_recovery_email or csv_data.get("admin_recovery_email"),
+            admin_username=admin_username or row.get("admin_username"),
         )
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc))
@@ -247,7 +249,7 @@ async def provision_csv(
         primary_domain=req.primary_domain,
         employee_count=1,
         employees=[{"first_name": final_admin_first, "last_name": final_admin_last, "personal_email": req.admin_recovery_email}],
-        message=f"Admin account provisioning queued for {req.company_name} ({final_admin_first} {final_admin_last}@{final_domain})",
+        message=f"Admin account provisioning queued for {req.company_name} ({req.admin_email})",
     )
 
 

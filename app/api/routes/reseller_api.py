@@ -288,6 +288,7 @@ async def reseller_provision_csv(
             admin_first_name=row.get("admin_first_name") or row.get("first_name") or "Admin",
             admin_last_name=row.get("admin_last_name") or row.get("last_name") or "User",
             admin_recovery_email=row.get("admin_recovery_email") or row.get("personal_email"),
+            admin_username=row.get("admin_username"),
         )
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc))

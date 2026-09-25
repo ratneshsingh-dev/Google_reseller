@@ -7,11 +7,14 @@ the provisioning orchestrator.
 
 from __future__ import annotations
 
+import re
 from typing import List, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app.core.security import validate_domain, validate_email
+from app.core.security import generate_corporate_email, validate_domain, validate_email
+
+_USERNAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9._'-]*[a-z0-9])?$")
 
 
 class PostalAddressRequest(BaseModel):
@@ -62,6 +65,15 @@ class ProvisioningRequest(BaseModel):
     admin_first_name: str = Field(..., min_length=1, max_length=100)
     admin_last_name: str = Field(..., min_length=1, max_length=100)
     admin_recovery_email: Optional[str] = Field(default=None, max_length=254)
+    admin_username: Optional[str] = Field(
+        default=None,
+        max_length=254,
+        description=(
+            "Login username for the admin account, e.g. 'ratnesh.s' → ratnesh.s@<primary_domain>. "
+            "A full address on the primary domain is also accepted. "
+            "Defaults to firstname.lastname if omitted."
+        ),
+    )
 
     # Legacy field — kept for backward compat but optional now
     employees: Optional[List[EmployeeRequest]] = Field(default=None)
@@ -86,6 +98,39 @@ class ProvisioningRequest(BaseModel):
         if v is not None and v != "" and not validate_email(v):
             raise ValueError(f"Invalid admin recovery email format: {v}")
         return v
+
+    @field_validator("admin_username")
+    @classmethod
+    def normalize_admin_username(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or not v.strip():
+            return None
+        return v.strip().lower()
+
+    @model_validator(mode="after")
+    def validate_admin_username(self) -> "ProvisioningRequest":
+        if self.admin_username is None:
+            return self
+        local, sep, domain = self.admin_username.partition("@")
+        if sep and domain != self.primary_domain:
+            raise ValueError(
+                f"admin_username domain '{domain}' must match primary_domain '{self.primary_domain}'"
+            )
+        if len(local) > 64 or ".." in local or not _USERNAME_RE.match(local):
+            raise ValueError(
+                f"Invalid admin_username '{local}': use letters, digits, '.', '-', '_' or "
+                "apostrophe; must start and end with a letter or digit (max 64 chars)"
+            )
+        self.admin_username = local
+        return self
+
+    @property
+    def admin_email(self) -> str:
+        """The admin account's login address on the new Workspace domain."""
+        if self.admin_username:
+            return f"{self.admin_username}@{self.primary_domain}"
+        return generate_corporate_email(
+            self.admin_first_name, self.admin_last_name, self.primary_domain, set()
+        )
 
     @property
     def admin_as_employee(self) -> EmployeeRequest:

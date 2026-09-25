@@ -233,7 +233,12 @@ class ProvisioningService:
                 # Enterprise flow: only create 1 admin account
                 admin_employee = request.admin_as_employee
                 admin_result = await self._provision_single_user(
-                    company_id, request.primary_domain, admin_employee, set(), is_admin=True
+                    company_id,
+                    request.primary_domain,
+                    admin_employee,
+                    set(),
+                    is_admin=True,
+                    email=request.admin_email,
                 )
 
                 users_created = 1 if admin_result == EmployeeStatus.PROVISIONED else 0
@@ -242,8 +247,7 @@ class ProvisioningService:
 
                 await self._complete_step(
                     step_id,
-                    f"Admin: {request.admin_first_name}.{request.admin_last_name}@{request.primary_domain} "
-                    f"| Status: {admin_result.value}",
+                    f"Admin: {request.admin_email} | Status: {admin_result.value}",
                 )
             except Exception as user_exc:
                 logger.warning(
@@ -559,10 +563,10 @@ class ProvisioningService:
         employee,
         existing_emails: set[str],
         is_admin: bool = False,
+        email: Optional[str] = None,
     ) -> EmployeeStatus:
         """Provision a single user with retry logic."""
-        # Generate corporate email
-        corporate_email = generate_corporate_email(
+        corporate_email = email or generate_corporate_email(
             employee.first_name, employee.last_name, domain, existing_emails
         )
 
@@ -733,10 +737,7 @@ class ProvisioningService:
             extra_recipient = admin_email_addr
         else:
             # New domain — user creation skipped; give clear setup instructions
-            intended_admin = (
-                f"{request.admin_first_name.lower()}.{request.admin_last_name.lower()}"
-                f"@{request.primary_domain}"
-            )
+            intended_admin = request.admin_email
             intended_password = "Welcome@12345!" # Default temporary password
             credentials_block = (
                 f"\n--- Admin Credentials (Action Required) ---\n"
