@@ -99,7 +99,8 @@ class GoogleDirectoryService(DirectoryService):
         try:
             return await self.get_user(user_email)
         except HttpError as e:
-            if e.status_code == 404:
+            # Customer domains managed by the reseller return 403, not 404, for a missing user.
+            if e.status_code in (403, 404):
                 return None
             raise
 
