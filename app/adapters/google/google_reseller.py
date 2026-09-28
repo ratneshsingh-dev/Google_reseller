@@ -229,9 +229,10 @@ class GoogleResellerService(ResellerService):
         plan_name = request.plan.plan_name.upper()
         num_seats = request.seats.number_of_seats
 
-        # TRIAL uses maximumNumberOfSeats, FLEXIBLE/ANNUAL use numberOfSeats
+        # TRIAL/FLEXIBLE are sized by maximumNumberOfSeats; ANNUAL plans by numberOfSeats.
+        # Sending numberOfSeats for FLEXIBLE is rejected: "The seats provided are not valid".
         # Do NOT include 'kind' in seats — it causes a 400 badRequest
-        if plan_name == "TRIAL":
+        if plan_name in ("TRIAL", "FLEXIBLE"):
             seats_body = {"maximumNumberOfSeats": num_seats}
         else:
             seats_body = {"numberOfSeats": num_seats}
