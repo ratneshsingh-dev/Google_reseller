@@ -22,8 +22,6 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from app.services.webhook_service import notify_reseller
-
 from app.core.exceptions import (
     CustomerAlreadyExistsError,
     DuplicateEmployeeError,
@@ -231,7 +229,6 @@ class ProvisioningService:
             users_created = 0
             users_failed = 0
             users_existing = 0
-            admin_status = "SKIPPED"
 
             try:
                 # Enterprise flow: only create 1 admin account
@@ -248,7 +245,6 @@ class ProvisioningService:
                 users_created = 1 if admin_result == EmployeeStatus.PROVISIONED else 0
                 users_failed = 1 if admin_result == EmployeeStatus.FAILED else 0
                 users_existing = 1 if admin_result == EmployeeStatus.EXISTING else 0
-                admin_status = admin_result.value
 
                 await self._complete_step(
                     step_id,
@@ -310,21 +306,6 @@ class ProvisioningService:
                 users_failed=users_failed,
             )
 
-            await notify_reseller(reseller_id, "provisioning.completed", {
-                "job_id": job_id,
-                "status": final_status.value,
-                "company_name": request.company_name,
-                "primary_domain": request.primary_domain,
-                "google_customer_id": google_customer_id,
-                "google_subscription_id": google_sub_id,
-                "plan": request.plan,
-                "sku_id": request.sku_id,
-                "total_licences": request.license_count,
-                "licences_added": seats_added,
-                "admin_email": request.admin_email,
-                "admin_status": admin_status,
-            })
-
         except Exception as exc:
             logger.error(
                 "provisioning_failed",
@@ -337,14 +318,6 @@ class ProvisioningService:
                 JobStatus.FAILED.value,
                 error_message=str(exc),
             )
-            await notify_reseller(reseller_id, "provisioning.failed", {
-                "job_id": job_id,
-                "status": JobStatus.FAILED.value,
-                "company_name": request.company_name,
-                "primary_domain": request.primary_domain,
-                "requested_licences": request.license_count,
-                "error_message": str(exc),
-            })
             raise
 
     # ------------------------------------------------------------------

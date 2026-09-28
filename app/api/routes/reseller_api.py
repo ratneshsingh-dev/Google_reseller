@@ -36,8 +36,6 @@ POST   /api/v1/reseller/domains/{domain}/activate    Reactivate a suspended subs
 PATCH  /api/v1/reseller/domains/{domain}/licences    Set total licences (reduce: FLEXIBLE only)
 DELETE /api/v1/reseller/domains/{domain}?confirm=... Cancel all subscriptions, release quota
 
-GET/PUT/DELETE /api/v1/reseller/webhook              Manage the provisioning webhook URL
-POST   /api/v1/reseller/webhook/test                 Send a signed test event
 
 COMMON ERRORS
 -------------
@@ -90,7 +88,6 @@ from app.models.requests import ProvisioningRequest
 from app.models.reseller_models import (
     AuditLogDocument,
     ChangeLicencesRequest,
-    WebhookConfigRequest,
     QuotaResponse,
     QuotaSummary,
     ResellerDocument,
@@ -102,12 +99,6 @@ from app.models.responses import (
     ProvisioningStepResponse,
 )
 from app.services.domain_service import DomainActionError
-from app.services.webhook_service import (
-    WebhookUrlError,
-    deliver,
-    generate_webhook_secret,
-    validate_webhook_url,
-)
 from app.workers import run_provisioning_job
 
 logger = get_logger(__name__)
@@ -639,71 +630,3 @@ async def delete_domain(
 ) -> dict:
     """Cancels every subscription immediately and returns the licences to your quota. Cannot be undone."""
     return await _run_domain_action(get_domain_service().delete(domain, reseller, confirm, _client_ip(request)))
-
-
-# ---------------------------------------------------------------------------
-# Webhook configuration
-# ---------------------------------------------------------------------------
-
-
-@router.get("/webhook", summary="Show your registered webhook URL")
-async def get_webhook(reseller: ResellerDocument = Depends(require_reseller_token)) -> dict:
-    return {
-        "url": reseller.webhook_url,
-        "configured": bool(reseller.webhook_url),
-        "events": ["provisioning.completed", "provisioning.failed"],
-    }
-
-
-@router.put("/webhook", summary="Register or replace your webhook URL")
-@limiter.limit("10/minute")
-async def set_webhook(
-    body: WebhookConfigRequest,
-    request: Request,
-    reseller: ResellerDocument = Depends(require_role(ResellerRole.RESELLER_FULL)),
-) -> dict:
-    """Save the URL and issue a new signing secret. The secret is shown only in this response."""
-    try:
-        url = await asyncio.to_thread(validate_webhook_url, body.url)
-    except WebhookUrlError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-
-    secret = generate_webhook_secret()
-    get_reseller_repo().update(reseller.reseller_id, {"webhook_url": url, "webhook_secret": secret})
-    ip = request.client.host if request.client else ""
-    _log_audit(get_audit_repo(), reseller_id=reseller.reseller_id, action="WEBHOOK_SET", ip=ip, details={"url": url})
-
-    return {
-        "url": url,
-        "secret": secret,
-        "events": ["provisioning.completed", "provisioning.failed"],
-        "message": "Webhook saved. Store the secret now; it is not shown again. Use it to verify X-Webhook-Signature.",
-    }
-
-
-@router.delete("/webhook", summary="Remove your webhook")
-async def delete_webhook(
-    request: Request,
-    reseller: ResellerDocument = Depends(require_role(ResellerRole.RESELLER_FULL)),
-) -> dict:
-    get_reseller_repo().update(reseller.reseller_id, {"webhook_url": None, "webhook_secret": None})
-    ip = request.client.host if request.client else ""
-    _log_audit(get_audit_repo(), reseller_id=reseller.reseller_id, action="WEBHOOK_REMOVED", ip=ip)
-    return {"configured": False, "message": "Webhook removed."}
-
-
-@router.post("/webhook/test", summary="Send a signed test event to your webhook")
-@limiter.limit("5/minute")
-async def test_webhook(
-    request: Request,
-    reseller: ResellerDocument = Depends(require_role(ResellerRole.RESELLER_FULL)),
-) -> dict:
-    if not reseller.webhook_url or not reseller.webhook_secret:
-        raise HTTPException(status_code=400, detail="No webhook registered. Call PUT /api/v1/reseller/webhook first.")
-    result = await deliver(
-        reseller.webhook_url,
-        reseller.webhook_secret,
-        "webhook.test",
-        {"reseller_id": reseller.reseller_id, "message": "Test event from the Workspace Provisioning API."},
-    )
-    return result
