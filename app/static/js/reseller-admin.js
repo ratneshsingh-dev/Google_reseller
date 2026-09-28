@@ -661,6 +661,25 @@ async function refreshSelectedReseller() {
   }
 }
 
+async function viewPartnerDashboard() {
+  if (!selectedReseller) return;
+  // Open the tab synchronously so pop-up blockers allow it, then point it at the dashboard.
+  const win = window.open('about:blank', '_blank');
+  try {
+    const data = await apiPost(`/resellers/${selectedReseller.reseller_id}/view-token`, {});
+    const params = new URLSearchParams({
+      admin_view: data.access_token,
+      rid: data.reseller_id,
+      email: data.contact_email || '',
+    });
+    const url = `/static/channel-partner.html#${params.toString()}`;
+    if (win) win.location.href = url; else window.location.href = url;
+  } catch (err) {
+    if (win) win.close();
+    showToast('Could not open dashboard: ' + err.message, 'error');
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Modal helpers
 // ---------------------------------------------------------------------------

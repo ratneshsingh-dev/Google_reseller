@@ -22,7 +22,12 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.core.auth_middleware import require_admin
-from app.core.jwt_service import generate_client_secret, hash_secret
+from app.core.jwt_service import (
+    ADMIN_VIEW_TOKEN_MAX_AGE_SECONDS,
+    create_admin_view_token,
+    generate_client_secret,
+    hash_secret,
+)
 from app.core.logging import get_logger
 from app.models.reseller_models import (
     AuditLogDocument,
@@ -345,6 +350,51 @@ async def regenerate_secret(
         "client_id": reseller_id,
         "client_secret": new_plain_secret,
         "message": "Secret rotated. All previous tokens are now invalid. Share the new client_secret with the reseller.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# View a partner's dashboard (read-only)
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/resellers/{reseller_id}/view-token",
+    summary="Get a read-only token to open this partner's dashboard",
+)
+async def create_view_token(
+    reseller_id: str,
+    admin=Depends(require_admin),
+) -> dict:
+    reseller_repo = ResellerRepository(get_store())
+    audit_repo = AuditRepository(get_store())
+    admin_email = getattr(admin, "email", "") or (admin.get("email", "") if isinstance(admin, dict) else "")
+
+    reseller = reseller_repo.get_by_id(reseller_id)
+    if not reseller:
+        raise HTTPException(status_code=404, detail=f"Reseller {reseller_id} not found.")
+
+    token = create_admin_view_token(reseller_id, admin_email, reseller.token_version)
+
+    try:
+        audit_repo.create(
+            AuditLogDocument(
+                log_id=f"LOG-{uuid.uuid4().hex[:8].upper()}",
+                reseller_id=reseller_id,
+                action="ADMIN_VIEW_DASHBOARD",
+                status="SUCCESS",
+                details={"by": admin_email},
+            )
+        )
+    except Exception:
+        pass
+
+    logger.info("admin_view_token_issued", reseller_id=reseller_id, by=admin_email)
+    return {
+        "access_token": token,
+        "reseller_id": reseller_id,
+        "contact_email": reseller.contact_email,
+        "expires_in": ADMIN_VIEW_TOKEN_MAX_AGE_SECONDS,
     }
 
 

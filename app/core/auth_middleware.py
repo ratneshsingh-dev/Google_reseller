@@ -93,8 +93,10 @@ async def require_reseller_token(
     token_version = payload.get("token_version", 0)
     token_type = payload.get("type")
 
-    if token_type != "access" or not reseller_id:
+    if token_type not in ("access", "admin_view") or not reseller_id:
         raise HTTPException(status_code=401, detail="Invalid token payload.")
+    admin_viewer = payload.get("viewer") if token_type == "admin_view" else None
+    request.state.admin_viewer = admin_viewer
 
     # Fetch reseller from storage
     from app.repositories.reseller_repository import ResellerRepository
@@ -112,6 +114,10 @@ async def require_reseller_token(
             status_code=401,
             detail="Token has been revoked. Please re-authenticate.",
         )
+
+    if admin_viewer:
+        logger.info("reseller_admin_view", reseller_id=reseller_id, viewer=admin_viewer)
+        return reseller
 
     # Check reseller status
     if reseller.status == ResellerStatus.SUSPENDED:
@@ -224,8 +230,14 @@ def require_role(*allowed_roles: ResellerRole):
     """
 
     async def _check_role(
+        request: Request,
         reseller: ResellerDocument = Depends(require_reseller_token),
     ) -> ResellerDocument:
+        if getattr(request.state, "admin_viewer", None):
+            raise HTTPException(
+                status_code=403,
+                detail="Admin view is read-only. Actions can only be performed by the partner.",
+            )
         if reseller.role not in allowed_roles:
             raise HTTPException(
                 status_code=403,

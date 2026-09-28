@@ -13,9 +13,11 @@ let _resellerId = null;
 let _partnerEmail = null;
 let _partnerData = null;  // quota response
 let _csvRows = [];
+let _adminView = false;
 
 const BASE = '/api/v1';
 const PORTAL_KEY = 'cp_session';
+const ADMIN_VIEW_KEY = 'cp_admin_view';
 
 // ---------------------------------------------------------------------------
 // Init
@@ -31,6 +33,24 @@ window.addEventListener('DOMContentLoaded', async () => {
       }
     }
   } catch (_) {}
+
+  // Admin view: the admin panel opens this page with a read-only token in the URL fragment.
+  const hash = new URLSearchParams(window.location.hash.slice(1));
+  if (hash.get('admin_view')) {
+    sessionStorage.setItem(ADMIN_VIEW_KEY, JSON.stringify({
+      token: hash.get('admin_view'), resellerId: hash.get('rid'), email: hash.get('email') || '',
+    }));
+    history.replaceState(null, '', window.location.pathname + window.location.search);
+  }
+  const adminSaved = sessionStorage.getItem(ADMIN_VIEW_KEY);
+  if (adminSaved) {
+    try {
+      const { token, resellerId, email } = JSON.parse(adminSaved);
+      _token = token; _resellerId = resellerId; _partnerEmail = email; _adminView = true;
+      showApp();
+      return;
+    } catch (_) {}
+  }
 
   const saved = sessionStorage.getItem(PORTAL_KEY);
   if (saved) {
@@ -145,6 +165,12 @@ async function doLogin() {
 }
 
 function doLogout() {
+  if (_adminView) {
+    sessionStorage.removeItem(ADMIN_VIEW_KEY);
+    window.close();
+    window.location.href = '/static/reseller-admin.html';
+    return;
+  }
   sessionStorage.removeItem(PORTAL_KEY);
   _token = null; _resellerId = null; _partnerEmail = null;
   document.getElementById('app-screen').style.display = 'none';
@@ -166,13 +192,26 @@ async function showApp() {
 
   // Show tabs based on access_methods returned by quota endpoint
   const methods = (_partnerData?.access_methods || ['API']);
-  document.getElementById('tab-manual').style.display = methods.includes('MANUAL') ? 'block' : 'none';
-  document.getElementById('tab-csv').style.display = methods.includes('CSV') ? 'block' : 'none';
+  document.getElementById('tab-manual').style.display = methods.includes('MANUAL') && !_adminView ? 'block' : 'none';
+  document.getElementById('tab-csv').style.display = methods.includes('CSV') && !_adminView ? 'block' : 'none';
   document.getElementById('tab-api').style.display = methods.includes('API') ? 'block' : 'none';
+
+  if (_adminView) showAdminViewBanner();
 
   // Load companies
   loadCompanies();
   populateApiGuide();
+}
+
+function showAdminViewBanner() {
+  document.querySelector('.cp-logout-btn').textContent = 'Close Admin View';
+  if (document.getElementById('admin-view-banner')) return;
+  const banner = document.createElement('div');
+  banner.id = 'admin-view-banner';
+  banner.style.cssText = 'padding:0.6rem 1.25rem;background:rgba(245,158,11,0.15);border-bottom:1px solid rgba(245,158,11,0.4);color:#fcd34d;font-size:0.85rem;text-align:center;';
+  banner.textContent = `Admin view (read-only): you are viewing ${_partnerEmail || _resellerId}'s dashboard. Provisioning is disabled.`;
+  const app = document.getElementById('app-screen');
+  app.insertBefore(banner, app.firstChild);
 }
 
 // ---------------------------------------------------------------------------
@@ -187,7 +226,14 @@ async function apiFetch(path, opts = {}) {
       ...(opts.headers || {}),
     },
   });
-  if (resp.status === 401) { doLogout(); throw new Error('Session expired'); }
+  if (resp.status === 401) {
+    if (_adminView) {
+      showToast('Admin view expired. Open it again from the admin panel.', 'error');
+      throw new Error('Admin view expired');
+    }
+    doLogout();
+    throw new Error('Session expired');
+  }
   return resp;
 }
 
