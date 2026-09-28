@@ -135,6 +135,8 @@ class TestDuplicateEmployees:
             "license_count": 3,
             "initiated_by_email": "admin@dupe-alt.com",
             "econz_notification_email": "econz@example.net",
+            "admin_first_name": "Ada",
+            "admin_last_name": "Admin",
             "employees": [
                 {"first_name": "John", "last_name": "Doe", "personal_email": "john1@g.com"},
                 {"first_name": "John", "last_name": "Doe", "personal_email": "john2@g.com"},

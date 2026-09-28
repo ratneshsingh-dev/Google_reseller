@@ -24,6 +24,7 @@ from app.repositories.notification_repository import NotificationRepository
 from app.repositories.reseller_repository import ResellerRepository
 from app.repositories.subscription_repository import SubscriptionRepository
 from app.services.directory_service import DirectoryService
+from app.services.domain_service import DomainService
 from app.services.email_service import EmailService
 from app.services.provisioning_service import ProvisioningService
 from app.services.reseller_service import ResellerService
@@ -139,6 +140,16 @@ def get_provisioning_service() -> ProvisioningService:
         job_repo=get_job_repo(),
         notification_repo=get_notification_repo(),
         reseller_repo=get_reseller_repo(),
+    )
+
+
+def get_domain_service() -> DomainService:
+    return DomainService(
+        reseller_service=get_reseller_service(),
+        company_repo=get_company_repo(),
+        subscription_repo=get_subscription_repo(),
+        reseller_repo=get_reseller_repo(),
+        audit_repo=get_audit_repo(),
     )
 
 

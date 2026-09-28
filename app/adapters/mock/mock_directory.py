@@ -163,7 +163,7 @@ class MockDirectoryService(DirectoryService):
         await asyncio.sleep(0.01)
         user = self._users.get(user_email.lower())
         if user:
-            user.isAdmin = True
+            user.is_admin = True
         else:
             raise UserNotFoundError(f"User {user_email} not found")
 

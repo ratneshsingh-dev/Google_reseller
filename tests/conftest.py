@@ -38,9 +38,12 @@ def reset_state():
     from app.core.config import get_settings
 
     # Clear caches
+    from app.core.rate_limit import limiter
+
     get_settings.cache_clear()
     reset_store()
     reset_dependencies()
+    limiter.reset()
     settings = get_settings()
     if settings.use_firestore or settings.service_adapter != "mock":
         pytest.exit("Refusing to run tests against real Google or Firestore.", returncode=2)
@@ -78,6 +81,8 @@ def sample_request() -> dict:
         "license_count": 3,
         "initiated_by_email": "developer@test-alt.com",
         "econz_notification_email": "econz@example.net",
+        "admin_first_name": "Ada",
+        "admin_last_name": "Admin",
         "employees": [
             {
                 "first_name": "Rahul",
@@ -118,6 +123,8 @@ def sample_request_small() -> dict:
         "license_count": 1,
         "initiated_by_email": "jane@small-alt.com",
         "econz_notification_email": "econz@example.net",
+        "admin_first_name": "Ada",
+        "admin_last_name": "Admin",
         "employees": [
             {
                 "first_name": "Jane",
