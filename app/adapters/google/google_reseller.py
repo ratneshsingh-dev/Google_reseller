@@ -84,6 +84,7 @@ def _parse_subscription(resp: dict) -> GoogleSubscription:
         subscriptionId=resp.get("subscriptionId", ""),
         skuId=resp.get("skuId", ""),
         status=resp.get("status", "ACTIVE"),
+        suspensionReasons=resp.get("suspensionReasons", []),
         billingMethod=resp.get("billingMethod", "ONLINE"),
         customerDomain=resp.get("customerDomain", ""),
         skuName=resp.get("skuName", ""),

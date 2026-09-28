@@ -9,7 +9,7 @@ GoogleResellerService requires minimal changes.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -124,6 +124,7 @@ class GoogleSubscription(BaseModel):
     plan: GoogleSubscriptionPlan
     seats: GoogleSubscriptionSeats
     status: str = "ACTIVE"
+    suspension_reasons: List[str] = Field(alias="suspensionReasons", default_factory=list)
     billing_method: str = Field(alias="billingMethod", default="ONLINE")
     customer_domain: str = Field(alias="customerDomain", default="")
     sku_name: str = Field(alias="skuName", default="")

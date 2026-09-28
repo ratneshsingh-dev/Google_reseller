@@ -29,6 +29,21 @@ logger = get_logger(__name__)
 
 GOOGLE_MAX_SEATS_PER_CALL = 100
 REDUCIBLE_PLANS = {"FLEXIBLE"}
+RESELLER_SUSPENSION = "RESELLER_INITIATED"
+
+_SUSPENSION_HELP = {
+    "PENDING_TOS_ACCEPTANCE": (
+        "The customer's admin must sign in at https://admin.google.com and accept the Google Workspace "
+        "Terms of Service; the subscription becomes active automatically after that."
+    ),
+    "TRIAL_ENDED": "The free trial has ended; move the subscription to a paid plan to continue.",
+    "RENEWAL_WITH_TYPE_CANCEL": "The subscription was set to cancel at renewal and has lapsed.",
+    "OTHER": "Google suspended it for another reason; contact Google partner support.",
+}
+
+
+def _explain(reason: str) -> str:
+    return _SUSPENSION_HELP.get(reason, f"Google suspension reason: {reason}.")
 
 
 class DomainActionError(Exception):
@@ -176,27 +191,56 @@ class DomainService:
     # ------------------------------------------------------------------
 
     async def _set_status(self, domain: str, reseller: ResellerDocument, ip: str, suspend: bool) -> dict:
+        """Add or remove OUR suspension. Google may hold its own suspensions (e.g. Terms of Service
+        not yet accepted) that only the customer or Google can lift, so we act on the reasons, not the status."""
         company = self._owned_company(domain, reseller)
         local, sub = await self._subscription_for(company)
-        target = "SUSPENDED" if suspend else "ACTIVE"
+        ours = RESELLER_SUSPENSION in sub.suspension_reasons
 
-        if sub.status != target:
-            action = self._google.suspend_subscription if suspend else self._google.activate_subscription
-            sub = await self._google_call(action, company.google_customer_id, sub.subscription_id)
+        if suspend:
+            if not ours:
+                sub = await self._google_call(self._google.suspend_subscription,
+                                              company.google_customer_id, sub.subscription_id)
+        else:
+            if not ours and sub.status == "SUSPENDED":
+                raise DomainActionError(409, {
+                    "error": "Cannot activate",
+                    "detail": (
+                        f"{company.primary_domain} was suspended by Google, not by you. "
+                        + " ".join(_explain(r) for r in sub.suspension_reasons)
+                    ).strip(),
+                    "status": sub.status,
+                    "suspension_reasons": sub.suspension_reasons,
+                })
+            if ours:
+                sub = await self._google_call(self._google.activate_subscription,
+                                              company.google_customer_id, sub.subscription_id)
 
-        self._companies.update_status(company.company_id, target)
+        google_reasons = [r for r in sub.suspension_reasons if r != RESELLER_SUSPENSION]
+        self._companies.update_status(company.company_id, sub.status)
         if local:
-            self._subscriptions.update(local.subscription_id, {"status": target})
+            self._subscriptions.update(local.subscription_id, {"status": sub.status})
         self._record(reseller.reseller_id, "DOMAIN_SUSPEND" if suspend else "DOMAIN_ACTIVATE",
-                     company.primary_domain, ip, {"google_subscription_id": sub.subscription_id})
-        logger.info("domain_status_changed", domain=company.primary_domain, status=target)
+                     company.primary_domain, ip,
+                     {"google_subscription_id": sub.subscription_id, "suspension_reasons": sub.suspension_reasons})
+        logger.info("domain_status_changed", domain=company.primary_domain, status=sub.status,
+                    reasons=sub.suspension_reasons)
+
+        if suspend:
+            message = f"{company.primary_domain} is now suspended by you."
+        elif google_reasons:
+            message = (f"Your suspension was removed, but {company.primary_domain} is still suspended by Google. "
+                       + " ".join(_explain(r) for r in google_reasons))
+        else:
+            message = f"{company.primary_domain} is now active."
 
         return {
             "domain": company.primary_domain,
-            "status": target,
+            "status": sub.status,
+            "suspension_reasons": sub.suspension_reasons,
             "google_customer_id": company.google_customer_id,
             "google_subscription_id": sub.subscription_id,
-            "message": f"{company.primary_domain} is now {target.lower()}.",
+            "message": message,
         }
 
     def _owned_company(self, domain: str, reseller: ResellerDocument) -> CompanyDocument:

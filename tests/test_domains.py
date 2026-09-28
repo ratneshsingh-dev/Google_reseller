@@ -98,6 +98,12 @@ class TestSuspendActivate:
     def test_suspend_then_activate(self, client, partner):
         r = client.post(f"{BASE}/flex.test/suspend", headers=partner)
         assert r.status_code == 200 and r.json()["status"] == "SUSPENDED"
+        assert r.json()["suspension_reasons"] == ["RESELLER_INITIATED"]
+        r = client.post(f"{BASE}/flex.test/activate", headers=partner)
+        assert r.status_code == 200 and r.json()["status"] == "ACTIVE"
+        assert r.json()["suspension_reasons"] == []
+
+    def test_activate_when_already_active_is_safe(self, client, partner):
         r = client.post(f"{BASE}/flex.test/activate", headers=partner)
         assert r.status_code == 200 and r.json()["status"] == "ACTIVE"
 
@@ -109,6 +115,46 @@ class TestSuspendActivate:
     def test_suspend_keeps_quota(self, client, partner):
         client.post(f"{BASE}/flex.test/suspend", headers=partner)
         assert _used("RSL-P1") == 8
+
+
+def _google_suspends(domain: str, reason: str) -> None:
+    """Simulate Google suspending the subscription itself (as it does for new paid plans)."""
+    from app.dependencies import get_reseller_service
+    mock = get_reseller_service()
+    for subs in mock._subscriptions.values():
+        for sid, sub in subs.items():
+            if sub.customer_domain == domain:
+                subs[sid] = sub.model_copy(update={"status": "SUSPENDED", "suspension_reasons": [reason]})
+
+
+class TestGoogleSuspension:
+    def test_cannot_activate_what_google_suspended(self, client, partner):
+        _google_suspends("flex.test", "PENDING_TOS_ACCEPTANCE")
+        r = client.post(f"{BASE}/flex.test/activate", headers=partner)
+        assert r.status_code == 409
+        body = r.json()["detail"]
+        assert body["suspension_reasons"] == ["PENDING_TOS_ACCEPTANCE"]
+        assert "Terms of Service" in body["detail"]
+
+    def test_suspend_adds_our_suspension_on_top(self, client, partner):
+        _google_suspends("flex.test", "PENDING_TOS_ACCEPTANCE")
+        r = client.post(f"{BASE}/flex.test/suspend", headers=partner)
+        assert r.status_code == 200
+        assert set(r.json()["suspension_reasons"]) == {"PENDING_TOS_ACCEPTANCE", "RESELLER_INITIATED"}
+
+    def test_activate_removes_ours_but_reports_google_hold(self, client, partner):
+        _google_suspends("flex.test", "PENDING_TOS_ACCEPTANCE")
+        client.post(f"{BASE}/flex.test/suspend", headers=partner)
+        r = client.post(f"{BASE}/flex.test/activate", headers=partner)
+        assert r.status_code == 200
+        assert r.json()["status"] == "SUSPENDED"
+        assert r.json()["suspension_reasons"] == ["PENDING_TOS_ACCEPTANCE"]
+        assert "still suspended by Google" in r.json()["message"]
+
+    def test_licences_can_change_while_google_holds_it(self, client, partner):
+        _google_suspends("flex.test", "PENDING_TOS_ACCEPTANCE")
+        r = client.patch(f"{BASE}/flex.test/licences", json={"license_count": 7}, headers=partner)
+        assert r.status_code == 200 and r.json()["licences"] == 7
 
 
 class TestDelete:
