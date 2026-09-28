@@ -31,6 +31,14 @@ GET   /api/v1/reseller/companies
 GET   /api/v1/reseller/companies/{company_id}
       Single company detail (own only - 404 if belongs to another reseller).
 
+POST   /api/v1/reseller/domains/{domain}/suspend     Suspend the domain's subscription
+POST   /api/v1/reseller/domains/{domain}/activate    Reactivate a suspended subscription
+PATCH  /api/v1/reseller/domains/{domain}/licences    Set total licences (reduce: FLEXIBLE only)
+DELETE /api/v1/reseller/domains/{domain}?confirm=... Cancel all subscriptions, release quota
+
+GET/PUT/DELETE /api/v1/reseller/webhook              Manage the provisioning webhook URL
+POST   /api/v1/reseller/webhook/test                 Send a signed test event
+
 COMMON ERRORS
 -------------
   401  Token missing, expired, or revoked - re-login
@@ -54,6 +62,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Query,
     Request,
     UploadFile,
 )
@@ -73,12 +82,16 @@ from app.dependencies import (
     get_job_repo,
     get_provisioning_service,
     get_reseller_repo,
+    get_reseller_service,
     get_subscription_repo,
 )
-from app.models.database import JobStatus, ProvisioningJobDocument
+from app.models.database import CompanyDocument, JobStatus, ProvisioningJobDocument
+from app.models.google_api import GoogleChangSeatsRequest, GoogleSubscriptionSeats
 from app.models.requests import ProvisioningRequest
 from app.models.reseller_models import (
     AuditLogDocument,
+    ChangeLicencesRequest,
+    WebhookConfigRequest,
     QuotaResponse,
     QuotaSummary,
     ResellerDocument,
@@ -88,6 +101,12 @@ from app.models.responses import (
     CompanyDetailResponse,
     EmployeeStatusResponse,
     ProvisioningStepResponse,
+)
+from app.services.webhook_service import (
+    WebhookUrlError,
+    deliver,
+    generate_webhook_secret,
+    validate_webhook_url,
 )
 from app.workers import run_provisioning_job
 
@@ -556,3 +575,333 @@ async def reseller_get_company(
             for e in employees
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Domain management — suspend / activate / delete / change licences
+# ---------------------------------------------------------------------------
+
+
+def _google_error(exc: Exception) -> HTTPException:
+    from googleapiclient.errors import HttpError
+
+    if isinstance(exc, HttpError):
+        reason = exc._get_reason() or str(exc)
+        if exc.status_code == 404:
+            return HTTPException(status_code=404, detail=f"Google could not find this subscription: {reason}")
+        if 400 <= exc.status_code < 500:
+            return HTTPException(status_code=400, detail=f"Google rejected the request: {reason}")
+    return HTTPException(status_code=502, detail=f"Google request failed: {str(exc)[:200]}")
+
+
+def _owned_domain(domain: str, reseller: ResellerDocument) -> CompanyDocument:
+    company = get_company_repo().get_by_domain(domain.strip().lower())
+    # Same 404 for "missing" and "someone else's" so domains of other partners are not revealed.
+    if not company or company.reseller_id != reseller.reseller_id:
+        raise HTTPException(status_code=404, detail=f"Domain {domain} was not found in your account.")
+    if company.status == "DELETED":
+        raise HTTPException(status_code=409, detail=f"Domain {domain} has already been deleted.")
+    if not company.google_customer_id:
+        raise HTTPException(status_code=409, detail=f"Domain {domain} has no Google customer yet.")
+    return company
+
+
+async def _domain_subscription(company: CompanyDocument):
+    """Return (local subscription record, live Google subscription) for the domain."""
+    local_subs = get_subscription_repo().get_by_company_id(company.company_id)
+    local = local_subs[0] if local_subs else None
+    try:
+        google_subs = await get_reseller_service().list_subscriptions(company.google_customer_id)
+    except Exception as exc:
+        raise _google_error(exc)
+
+    if local and local.google_subscription_id:
+        match = next((s for s in google_subs if s.subscription_id == local.google_subscription_id), None)
+        if match:
+            return local, match
+    if len(google_subs) == 1:
+        return local, google_subs[0]
+    raise HTTPException(
+        status_code=409,
+        detail=f"Could not identify a single active subscription for {company.primary_domain}.",
+    )
+
+
+def _audit(reseller_id: str, action: str, domain: str, ip: str, details: dict, licences: int = 0) -> None:
+    _log_audit(
+        get_audit_repo(),
+        reseller_id=reseller_id,
+        action=action,
+        resource_type="domain",
+        resource_id=domain,
+        licences_requested=licences,
+        ip=ip,
+        details=details,
+    )
+
+
+async def _set_domain_status(domain: str, request: Request, reseller: ResellerDocument, suspend: bool) -> dict:
+    company = _owned_domain(domain, reseller)
+    local, sub = await _domain_subscription(company)
+    target = "SUSPENDED" if suspend else "ACTIVE"
+
+    if sub.status != target:
+        service = get_reseller_service()
+        try:
+            if suspend:
+                sub = await service.suspend_subscription(company.google_customer_id, sub.subscription_id)
+            else:
+                sub = await service.activate_subscription(company.google_customer_id, sub.subscription_id)
+        except Exception as exc:
+            raise _google_error(exc)
+
+    get_company_repo().update_status(company.company_id, target)
+    if local:
+        get_subscription_repo().update(local.subscription_id, {"status": target})
+
+    ip = request.client.host if request.client else ""
+    _audit(reseller.reseller_id, "DOMAIN_SUSPEND" if suspend else "DOMAIN_ACTIVATE", company.primary_domain, ip,
+           {"google_subscription_id": sub.subscription_id})
+    logger.info("domain_status_changed", domain=company.primary_domain, status=target, reseller_id=reseller.reseller_id)
+
+    return {
+        "domain": company.primary_domain,
+        "status": target,
+        "google_customer_id": company.google_customer_id,
+        "google_subscription_id": sub.subscription_id,
+        "message": f"{company.primary_domain} is now {target.lower()}.",
+    }
+
+
+@router.post("/domains/{domain}/suspend", summary="Suspend a domain's Google Workspace subscription")
+@limiter.limit("10/minute")
+async def suspend_domain(
+    domain: str,
+    request: Request,
+    reseller: ResellerDocument = Depends(require_role(ResellerRole.RESELLER_FULL)),
+) -> dict:
+    """Suspend the subscription. Users lose access; data and licences are kept until you activate or delete."""
+    return await _set_domain_status(domain, request, reseller, suspend=True)
+
+
+@router.post("/domains/{domain}/activate", summary="Reactivate a suspended domain")
+@limiter.limit("10/minute")
+async def activate_domain(
+    domain: str,
+    request: Request,
+    reseller: ResellerDocument = Depends(require_role(ResellerRole.RESELLER_FULL)),
+) -> dict:
+    return await _set_domain_status(domain, request, reseller, suspend=False)
+
+
+@router.patch("/domains/{domain}/licences", summary="Change the total licences on a domain")
+@limiter.limit("10/minute")
+async def change_domain_licences(
+    domain: str,
+    body: ChangeLicencesRequest,
+    request: Request,
+    reseller: ResellerDocument = Depends(require_role(ResellerRole.RESELLER_FULL)),
+) -> dict:
+    """Set a new TOTAL. Increases work on any plan; decreases only on the FLEXIBLE plan."""
+    company = _owned_domain(domain, reseller)
+    local, sub = await _domain_subscription(company)
+    plan = sub.plan.plan_name.upper()
+    current = sub.seats.number_of_seats
+    target = body.license_count
+    delta = target - current
+
+    if delta == 0:
+        return {
+            "domain": company.primary_domain, "plan": plan, "previous_licences": current,
+            "licences": current, "change": 0, "message": "No change: the domain already has this many licences.",
+        }
+    if delta < 0 and plan != "FLEXIBLE":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Licences can only be reduced on the FLEXIBLE plan. {company.primary_domain} is on {plan}.",
+        )
+    if delta > 0:
+        check_licence_cap(reseller, delta)
+
+    service = get_reseller_service()
+    try:
+        if delta > 0:
+            # Google accepts at most 100 extra seats per call.
+            step_from = current
+            while step_from < target:
+                step_to = min(step_from + 100, target)
+                sub = await service.change_seats(
+                    company.google_customer_id, sub.subscription_id,
+                    GoogleChangSeatsRequest(seats=GoogleSubscriptionSeats(numberOfSeats=step_to, licensedNumberOfSeats=step_to)),
+                    plan_name=plan,
+                )
+                step_from = step_to
+        else:
+            sub = await service.change_seats(
+                company.google_customer_id, sub.subscription_id,
+                GoogleChangSeatsRequest(seats=GoogleSubscriptionSeats(numberOfSeats=target, licensedNumberOfSeats=target)),
+                plan_name=plan,
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise _google_error(exc)
+
+    get_reseller_repo().increment_licences_used(reseller.reseller_id, delta)
+    if local:
+        get_subscription_repo().update(local.subscription_id, {"seats": target})
+
+    ip = request.client.host if request.client else ""
+    _audit(reseller.reseller_id, "LICENCES_CHANGED", company.primary_domain, ip,
+           {"from": current, "to": target, "plan": plan}, licences=delta)
+    logger.info("domain_licences_changed", domain=company.primary_domain, previous=current, new=target)
+
+    fresh = get_reseller_repo().get_by_id(reseller.reseller_id) or reseller
+    return {
+        "domain": company.primary_domain,
+        "plan": plan,
+        "previous_licences": current,
+        "licences": target,
+        "change": delta,
+        "quota": {
+            "licences_used": fresh.licences_used,
+            "max_licence_cap": fresh.max_licence_cap,
+            "licences_remaining": fresh.licences_remaining,
+        },
+        "message": f"{company.primary_domain} now has {target} licences ({'+' if delta > 0 else ''}{delta}).",
+    }
+
+
+@router.delete("/domains/{domain}", summary="Delete a domain (cancels its subscriptions)")
+@limiter.limit("10/minute")
+async def delete_domain(
+    domain: str,
+    request: Request,
+    confirm: Optional[str] = Query(None, description="Repeat the domain name to confirm"),
+    reseller: ResellerDocument = Depends(require_role(ResellerRole.RESELLER_FULL)),
+) -> dict:
+    """Cancel every subscription on the domain immediately and return its licences to your quota.
+
+    This cannot be undone. Google keeps the customer record, but service stops.
+    """
+    if (confirm or "").strip().lower() != domain.strip().lower():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Deleting cancels all subscriptions immediately and cannot be undone. "
+                f"To confirm, repeat the domain: DELETE /api/v1/reseller/domains/{domain}?confirm={domain}"
+            ),
+        )
+
+    company = _owned_domain(domain, reseller)
+    service = get_reseller_service()
+    try:
+        google_subs = await service.list_subscriptions(company.google_customer_id)
+    except Exception as exc:
+        raise _google_error(exc)
+
+    cancelled, released, error = [], 0, None
+    for sub in google_subs:
+        try:
+            await service.delete_subscription(company.google_customer_id, sub.subscription_id)
+            cancelled.append(sub.subscription_id)
+            released += sub.seats.number_of_seats
+        except Exception as exc:
+            error = _google_error(exc)
+            break
+
+    if released:
+        get_reseller_repo().increment_licences_used(reseller.reseller_id, -released)
+
+    ip = request.client.host if request.client else ""
+    if error:
+        _audit(reseller.reseller_id, "DOMAIN_DELETE", company.primary_domain, ip,
+               {"cancelled": cancelled, "licences_released": released, "error": error.detail}, licences=-released)
+        raise HTTPException(
+            status_code=error.status_code,
+            detail=f"{error.detail} Cancelled before the error: {cancelled or 'none'}; licences released: {released}.",
+        )
+
+    get_company_repo().update_status(company.company_id, "DELETED")
+    for local in get_subscription_repo().get_by_company_id(company.company_id):
+        get_subscription_repo().update(local.subscription_id, {"status": "CANCELLED"})
+
+    _audit(reseller.reseller_id, "DOMAIN_DELETE", company.primary_domain, ip,
+           {"cancelled": cancelled, "licences_released": released}, licences=-released)
+    logger.info("domain_deleted", domain=company.primary_domain, cancelled=cancelled, released=released)
+
+    return {
+        "domain": company.primary_domain,
+        "status": "DELETED",
+        "cancelled_subscriptions": cancelled,
+        "licences_released": released,
+        "message": f"All subscriptions for {company.primary_domain} were cancelled and {released} licence(s) returned to your quota.",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Webhook configuration
+# ---------------------------------------------------------------------------
+
+
+@router.get("/webhook", summary="Show your registered webhook URL")
+async def get_webhook(reseller: ResellerDocument = Depends(require_reseller_token)) -> dict:
+    return {
+        "url": reseller.webhook_url,
+        "configured": bool(reseller.webhook_url),
+        "events": ["provisioning.completed", "provisioning.failed"],
+    }
+
+
+@router.put("/webhook", summary="Register or replace your webhook URL")
+@limiter.limit("10/minute")
+async def set_webhook(
+    body: WebhookConfigRequest,
+    request: Request,
+    reseller: ResellerDocument = Depends(require_role(ResellerRole.RESELLER_FULL)),
+) -> dict:
+    """Save the URL and issue a new signing secret. The secret is shown only in this response."""
+    try:
+        url = await asyncio.to_thread(validate_webhook_url, body.url)
+    except WebhookUrlError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    secret = generate_webhook_secret()
+    get_reseller_repo().update(reseller.reseller_id, {"webhook_url": url, "webhook_secret": secret})
+    ip = request.client.host if request.client else ""
+    _log_audit(get_audit_repo(), reseller_id=reseller.reseller_id, action="WEBHOOK_SET", ip=ip, details={"url": url})
+
+    return {
+        "url": url,
+        "secret": secret,
+        "events": ["provisioning.completed", "provisioning.failed"],
+        "message": "Webhook saved. Store the secret now; it is not shown again. Use it to verify X-Webhook-Signature.",
+    }
+
+
+@router.delete("/webhook", summary="Remove your webhook")
+async def delete_webhook(
+    request: Request,
+    reseller: ResellerDocument = Depends(require_role(ResellerRole.RESELLER_FULL)),
+) -> dict:
+    get_reseller_repo().update(reseller.reseller_id, {"webhook_url": None, "webhook_secret": None})
+    ip = request.client.host if request.client else ""
+    _log_audit(get_audit_repo(), reseller_id=reseller.reseller_id, action="WEBHOOK_REMOVED", ip=ip)
+    return {"configured": False, "message": "Webhook removed."}
+
+
+@router.post("/webhook/test", summary="Send a signed test event to your webhook")
+@limiter.limit("5/minute")
+async def test_webhook(
+    request: Request,
+    reseller: ResellerDocument = Depends(require_role(ResellerRole.RESELLER_FULL)),
+) -> dict:
+    if not reseller.webhook_url or not reseller.webhook_secret:
+        raise HTTPException(status_code=400, detail="No webhook registered. Call PUT /api/v1/reseller/webhook first.")
+    result = await deliver(
+        reseller.webhook_url,
+        reseller.webhook_secret,
+        "webhook.test",
+        {"reseller_id": reseller.reseller_id, "message": "Test event from the Workspace Provisioning API."},
+    )
+    return result

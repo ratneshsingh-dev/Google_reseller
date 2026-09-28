@@ -62,6 +62,8 @@ class ResellerDocument(BaseModel):
     updated_at: datetime = Field(default_factory=_utcnow)
     last_api_call_at: Optional[datetime] = None
     created_by: str = ""                     # Admin email who created this
+    webhook_url: Optional[str] = None
+    webhook_secret: Optional[str] = None     # HMAC key for signing webhook payloads
 
     @property
     def licences_remaining(self) -> int:
@@ -114,6 +116,16 @@ class EmailLoginRequest(BaseModel):
     """Channel partner logs into the portal with email + client_secret."""
     email: str
     client_secret: str
+
+
+class ChangeLicencesRequest(BaseModel):
+    """Set the total number of licences on a provisioned domain."""
+    license_count: int = Field(..., ge=1, description="New TOTAL licence count for the domain")
+
+
+class WebhookConfigRequest(BaseModel):
+    """Register the URL that receives provisioning notifications."""
+    url: str = Field(..., max_length=2048, description="Public HTTPS URL")
 
 
 class UpdateResellerRequest(BaseModel):

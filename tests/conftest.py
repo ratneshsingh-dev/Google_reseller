@@ -23,6 +23,12 @@ os.environ["MOCK_FAILURE_MODE"] = "false"
 os.environ["MOCK_FAILURE_RATE"] = "0.0"
 os.environ["LOG_LEVEL"] = "WARNING"
 
+# app/main.py calls load_dotenv(override=True); a developer .env can point at real
+# Google and a real Firestore database, which would silently replace the values above.
+import dotenv  # noqa: E402
+
+dotenv.load_dotenv = lambda *args, **kwargs: False
+
 
 @pytest.fixture(autouse=True)
 def reset_state():
@@ -35,6 +41,9 @@ def reset_state():
     get_settings.cache_clear()
     reset_store()
     reset_dependencies()
+    settings = get_settings()
+    if settings.use_firestore or settings.service_adapter != "mock":
+        pytest.exit("Refusing to run tests against real Google or Firestore.", returncode=2)
     yield
     get_settings.cache_clear()
     reset_store()

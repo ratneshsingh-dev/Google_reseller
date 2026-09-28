@@ -208,8 +208,29 @@ class MockResellerService(ResellerService):
         )
         return subscription
 
+    async def suspend_subscription(self, customer_id: str, subscription_id: str) -> GoogleSubscription:
+        return self._set_status(customer_id, subscription_id, "SUSPENDED")
+
+    async def activate_subscription(self, customer_id: str, subscription_id: str) -> GoogleSubscription:
+        return self._set_status(customer_id, subscription_id, "ACTIVE")
+
+    async def delete_subscription(self, customer_id: str, subscription_id: str) -> None:
+        self._maybe_fail()
+        self._subscriptions.get(customer_id, {}).pop(subscription_id, None)
+
+    def _set_status(self, customer_id: str, subscription_id: str, status: str) -> GoogleSubscription:
+        self._maybe_fail()
+        sub = self._subscriptions[customer_id][subscription_id]
+        updated = sub.model_copy(update={"status": status})
+        self._subscriptions[customer_id][subscription_id] = updated
+        return updated
+
     async def change_seats(
-        self, customer_id: str, subscription_id: str, request: GoogleChangSeatsRequest
+        self,
+        customer_id: str,
+        subscription_id: str,
+        request: GoogleChangSeatsRequest,
+        plan_name: Optional[str] = None,
     ) -> GoogleSubscription:
         self._maybe_fail()
         await asyncio.sleep(0.01)

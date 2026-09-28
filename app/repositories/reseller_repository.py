@@ -60,10 +60,10 @@ class ResellerRepository:
         self._store.update(self.COLLECTION, reseller_id, data)
 
     def increment_licences_used(self, reseller_id: str, count: int) -> None:
-        """Atomically (best-effort) increment the licences_used counter."""
+        """Best-effort adjust of licences_used; a negative count releases licences."""
         reseller = self.get_by_id(reseller_id)
         if reseller:
-            new_count = reseller.licences_used + count
+            new_count = max(0, reseller.licences_used + count)
             self.update(reseller_id, {"licences_used": new_count})
 
     def increment_token_version(self, reseller_id: str) -> int:

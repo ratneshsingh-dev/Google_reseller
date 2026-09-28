@@ -269,9 +269,17 @@ class GoogleResellerService(ResellerService):
         customer_id: str,
         subscription_id: str,
         request: GoogleChangSeatsRequest,
+        plan_name: Optional[str] = None,
     ) -> GoogleSubscription:
-        body = {"numberOfSeats": request.seats.number_of_seats,
-                "maximumNumberOfSeats": request.seats.number_of_seats}
+        seats = request.seats.number_of_seats
+        plan = (plan_name or "").upper()
+        # TRIAL/FLEXIBLE are capped by maximumNumberOfSeats; annual plans by numberOfSeats.
+        if plan in ("TRIAL", "FLEXIBLE"):
+            body = {"maximumNumberOfSeats": seats}
+        elif plan.startswith("ANNUAL"):
+            body = {"numberOfSeats": seats}
+        else:
+            body = {"numberOfSeats": seats, "maximumNumberOfSeats": seats}
         try:
             resp = (
                 self._service.subscriptions()
@@ -281,6 +289,44 @@ class GoogleResellerService(ResellerService):
             return _parse_subscription(resp)
         except HttpError as e:
             logger.error("google_reseller_change_seats_error", customer_id=customer_id, error=str(e))
+            raise
+
+    async def suspend_subscription(self, customer_id: str, subscription_id: str) -> GoogleSubscription:
+        try:
+            resp = self._execute_with_retry(
+                lambda svc: svc.subscriptions()
+                .suspend(customerId=customer_id, subscriptionId=subscription_id)
+                .execute()
+            )
+            logger.info("google_reseller_subscription_suspended", customer_id=customer_id, subscription_id=subscription_id)
+            return _parse_subscription(resp)
+        except HttpError as e:
+            logger.error("google_reseller_suspend_error", customer_id=customer_id, status=e.status_code, error=str(e))
+            raise
+
+    async def activate_subscription(self, customer_id: str, subscription_id: str) -> GoogleSubscription:
+        try:
+            resp = self._execute_with_retry(
+                lambda svc: svc.subscriptions()
+                .activate(customerId=customer_id, subscriptionId=subscription_id)
+                .execute()
+            )
+            logger.info("google_reseller_subscription_activated", customer_id=customer_id, subscription_id=subscription_id)
+            return _parse_subscription(resp)
+        except HttpError as e:
+            logger.error("google_reseller_activate_error", customer_id=customer_id, status=e.status_code, error=str(e))
+            raise
+
+    async def delete_subscription(self, customer_id: str, subscription_id: str) -> None:
+        try:
+            self._execute_with_retry(
+                lambda svc: svc.subscriptions()
+                .delete(customerId=customer_id, subscriptionId=subscription_id, deletionType="cancel")
+                .execute()
+            )
+            logger.info("google_reseller_subscription_cancelled", customer_id=customer_id, subscription_id=subscription_id)
+        except HttpError as e:
+            logger.error("google_reseller_delete_error", customer_id=customer_id, status=e.status_code, error=str(e))
             raise
 
     async def change_plan(
