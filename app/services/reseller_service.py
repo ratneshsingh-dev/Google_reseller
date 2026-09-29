@@ -77,8 +77,12 @@ class ResellerService(ABC):
         ...
 
     @abstractmethod
-    async def delete_subscription(self, customer_id: str, subscription_id: str) -> None:
-        """Cancel a subscription immediately."""
+    async def transfer_to_google(self, customer_id: str, subscription_ids: List[str]) -> None:
+        """Hand the subscriptions over to Google (deletionType=transfer_to_direct).
+
+        The customer moves to direct billing with Google and the reseller stops being billed.
+        Google requires all of a customer's subscriptions to be transferred in one batch.
+        """
         ...
 
     @abstractmethod

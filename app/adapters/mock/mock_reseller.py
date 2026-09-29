@@ -218,9 +218,10 @@ class MockResellerService(ResellerService):
             raise ValueError("Operation disallowed because subscription was not suspended by reseller")
         return self._set_status(customer_id, subscription_id, [r for r in reasons if r != "RESELLER_INITIATED"])
 
-    async def delete_subscription(self, customer_id: str, subscription_id: str) -> None:
+    async def transfer_to_google(self, customer_id: str, subscription_ids: List[str]) -> None:
         self._maybe_fail()
-        self._subscriptions.get(customer_id, {}).pop(subscription_id, None)
+        for subscription_id in subscription_ids:
+            self._subscriptions.get(customer_id, {}).pop(subscription_id, None)
 
     def _set_status(self, customer_id: str, subscription_id: str, reasons: List[str]) -> GoogleSubscription:
         """Mirror Google: a subscription is SUSPENDED while it has any suspension reason."""

@@ -160,10 +160,12 @@ class TestDelete:
         assert client.delete(f"{BASE}/flex.test?confirm=other.test", headers=partner).status_code == 400
         assert _used("RSL-P1") == 8
 
-    def test_delete_releases_licences(self, client, partner):
+    def test_delete_transfers_to_google_and_releases_licences(self, client, partner):
         r = client.delete(f"{BASE}/flex.test?confirm=flex.test", headers=partner)
         assert r.status_code == 200, r.text
-        assert r.json()["licences_released"] == 5
+        body = r.json()
+        assert body["status"] == "TRANSFERRED_TO_GOOGLE"
+        assert body["licences_released"] == 5 and len(body["transferred_subscriptions"]) == 1
         assert _used("RSL-P1") == 3
 
     def test_deleted_domain_cannot_be_used(self, client, partner):
@@ -175,11 +177,25 @@ class TestDelete:
         ):
             assert call().status_code == 409
 
-    def test_reprovisioning_a_deleted_domain_works(self, client, partner):
-        client.delete(f"{BASE}/flex.test?confirm=flex.test", headers=partner)
-        _provision("flex.test", "FLEXIBLE", 2, "RSL-P1")
-        r = client.post(f"{BASE}/flex.test/suspend", headers=partner)
-        assert r.status_code == 200
+    def test_all_subscriptions_are_transferred_in_one_call(self, client, partner, monkeypatch):
+        from app.dependencies import get_reseller_service
+        mock = get_reseller_service()
+        customer_id, subs = next((cid, s) for cid, s in mock._subscriptions.items()
+                                 if any(x.customer_domain == "flex.test" for x in s.values()))
+        first = next(iter(subs.values()))
+        subs["SUB-EXTRA"] = first.model_copy(update={"subscription_id": "SUB-EXTRA", "sku_id": "OTHER-SKU"})
+        calls = []
+        original = mock.transfer_to_google
+
+        async def record(cid, ids):
+            calls.append(list(ids))
+            return await original(cid, ids)
+
+        monkeypatch.setattr(mock, "transfer_to_google", record)
+        r = client.delete(f"{BASE}/flex.test?confirm=flex.test", headers=partner)
+        assert r.status_code == 200, r.text
+        assert len(calls) == 1 and len(calls[0]) == 2
+        assert r.json()["licences_released"] == 10
 
 
 class TestAccess:

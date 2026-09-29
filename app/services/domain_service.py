@@ -33,6 +33,7 @@ GOOGLE_MAX_SEATS_PER_CALL = 100
 DOMAIN_ACTION_LOCK_SECONDS = 3 * 60
 REDUCIBLE_PLANS = {"FLEXIBLE"}
 RESELLER_SUSPENSION = "RESELLER_INITIATED"
+TRANSFERRED = "TRANSFERRED_TO_GOOGLE"
 
 _SUSPENSION_HELP = {
     "PENDING_TOS_ACCEPTANCE": (
@@ -99,7 +100,8 @@ class DomainService:
         if (confirm or "").strip().lower() != domain.strip().lower():
             raise DomainActionError(
                 400,
-                "Deleting cancels all subscriptions immediately and cannot be undone. "
+                "This transfers the domain to Google: the customer moves to direct billing with Google, "
+                "you stop being billed, and it cannot be undone. "
                 f"To confirm, repeat the domain: DELETE /api/v1/reseller/domains/{domain}?confirm={domain}",
             )
         async with self._domain_lock(domain, "delete"):
@@ -167,51 +169,44 @@ class DomainService:
                                     f"{company.primary_domain} now has {target} licences ({sign}{delta}).")
 
     async def _delete(self, domain: str, reseller: ResellerDocument, ip: str = "") -> dict:
-        """Cancel every subscription on the domain and return its licences to the quota."""
+        """Transfer the domain's subscriptions to Google and return their licences to the quota.
+
+        Google no longer lets resellers cancel Workspace subscriptions; transfer_to_direct is the
+        supported way to end the reseller relationship. All subscriptions go in one call because
+        Google requires a customer's subscriptions to be transferred together.
+        """
         company = self._owned_company(domain, reseller)
         google_subs = await self._google_call(self._google.list_subscriptions, company.google_customer_id)
+        if not google_subs:
+            raise DomainActionError(409, f"{company.primary_domain} has no subscriptions at Google to transfer.")
 
-        cancelled, released = [], 0
-        failure: Optional[DomainActionError] = None
-        for sub in google_subs:
-            try:
-                await self._google_call(self._google.delete_subscription,
-                                        company.google_customer_id, sub.subscription_id)
-            except DomainActionError as exc:
-                failure = exc
-                break
-            cancelled.append(sub.subscription_id)
-            released += sub.seats.number_of_seats
+        subscription_ids = [s.subscription_id for s in google_subs]
+        released = sum(s.seats.number_of_seats for s in google_subs)
+        try:
+            await self._google_call(self._google.transfer_to_google, company.google_customer_id, subscription_ids)
+        except DomainActionError as exc:
+            self._record(reseller.reseller_id, "DOMAIN_TRANSFER", company.primary_domain, ip,
+                         {"subscriptions": subscription_ids, "error": exc.detail}, status="FAILED")
+            raise
 
-        if released:
-            self._resellers.increment_licences_used(reseller.reseller_id, -released)
-
-        if failure:
-            self._record(reseller.reseller_id, "DOMAIN_DELETE", company.primary_domain, ip,
-                         {"cancelled": cancelled, "licences_released": released, "error": failure.detail},
-                         licences=-released, status="FAILED")
-            raise DomainActionError(
-                failure.status_code,
-                f"{failure.detail} Cancelled before the error: {cancelled or 'none'}; "
-                f"licences released: {released}.",
-            )
-
-        self._companies.update_status(company.company_id, "DELETED")
+        self._resellers.increment_licences_used(reseller.reseller_id, -released)
+        self._companies.update_status(company.company_id, TRANSFERRED)
         for local in self._subscriptions.get_by_company_id(company.company_id):
-            self._subscriptions.update(local.subscription_id, {"status": "CANCELLED"})
-        self._record(reseller.reseller_id, "DOMAIN_DELETE", company.primary_domain, ip,
-                     {"cancelled": cancelled, "licences_released": released}, licences=-released)
-        logger.info("domain_deleted", domain=company.primary_domain, cancelled=cancelled, released=released)
+            self._subscriptions.update(local.subscription_id, {"status": TRANSFERRED})
+        self._record(reseller.reseller_id, "DOMAIN_TRANSFER", company.primary_domain, ip,
+                     {"subscriptions": subscription_ids, "licences_released": released}, licences=-released)
+        logger.info("domain_transferred_to_google", domain=company.primary_domain,
+                    subscriptions=subscription_ids, released=released)
 
         return {
             "domain": company.primary_domain,
-            "status": "DELETED",
-            "cancelled_subscriptions": cancelled,
+            "status": TRANSFERRED,
+            "transferred_subscriptions": subscription_ids,
             "licences_released": released,
             "quota": self._quota(reseller.reseller_id, reseller),
             "message": (
-                f"All subscriptions for {company.primary_domain} were cancelled and "
-                f"{released} licence(s) returned to your quota."
+                f"{company.primary_domain} was transferred to Google: the customer is now billed directly by "
+                f"Google and you are no longer billed. {released} licence(s) returned to your quota."
             ),
         }
 
@@ -277,8 +272,10 @@ class DomainService:
         # Same answer for "missing" and "belongs to another partner", so other partners' domains stay hidden.
         if not company or company.reseller_id != reseller.reseller_id:
             raise DomainActionError(404, f"Domain {domain} was not found in your account.")
-        if company.status == "DELETED":
-            raise DomainActionError(409, f"Domain {domain} has already been deleted.")
+        if company.status in (TRANSFERRED, "DELETED"):
+            raise DomainActionError(
+                409, f"Domain {domain} has already been transferred to Google and is no longer managed by you."
+            )
         if not company.google_customer_id:
             raise DomainActionError(409, f"Domain {domain} has no Google customer yet.")
         return company

@@ -34,7 +34,7 @@ GET   /api/v1/reseller/companies/{company_id}
 POST   /api/v1/reseller/domains/{domain}/suspend     Suspend the domain's subscription
 POST   /api/v1/reseller/domains/{domain}/activate    Reactivate a suspended subscription
 PATCH  /api/v1/reseller/domains/{domain}/licences    Set total licences (reduce: FLEXIBLE only)
-DELETE /api/v1/reseller/domains/{domain}?confirm=... Cancel all subscriptions, release quota
+DELETE /api/v1/reseller/domains/{domain}?confirm=... Transfer to Google, release quota
 
 
 COMMON ERRORS
@@ -562,7 +562,7 @@ async def change_domain_licences(
     )
 
 
-@router.delete("/domains/{domain}", summary="Delete a domain (cancels its subscriptions)")
+@router.delete("/domains/{domain}", summary="Remove a domain from your account (transfers it to Google)")
 @limiter.limit("60/minute")
 async def delete_domain(
     domain: str,
@@ -570,5 +570,7 @@ async def delete_domain(
     confirm: Optional[str] = Query(None, description="Repeat the domain name to confirm"),
     reseller: ResellerDocument = Depends(require_role(ResellerRole.RESELLER_FULL)),
 ) -> dict:
-    """Cancels every subscription immediately and returns the licences to your quota. Cannot be undone."""
+    """Transfers the domain's subscriptions to Google (Google no longer allows resellers to cancel
+    Workspace subscriptions). The customer is billed directly by Google from then on, you stop being
+    billed, and the licences return to your quota. Cannot be undone."""
     return await _run_domain_action(get_domain_service().delete(domain, reseller, confirm, _client_ip(request)))

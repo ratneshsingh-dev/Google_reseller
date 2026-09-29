@@ -333,16 +333,37 @@ class GoogleResellerService(ResellerService):
             logger.error("google_reseller_activate_error", customer_id=customer_id, status=e.status_code, error=str(e))
             raise
 
-    async def delete_subscription(self, customer_id: str, subscription_id: str) -> None:
-        try:
-            self._execute_with_retry(
-                lambda svc: svc.subscriptions()
-                .delete(customerId=customer_id, subscriptionId=subscription_id, deletionType="cancel")
-                .execute()
+    async def transfer_to_google(self, customer_id: str, subscription_ids: List[str]) -> None:
+        # deletionType="cancel" is no longer supported for Google Workspace subscriptions.
+        def request(svc, sid):
+            return svc.subscriptions().delete(
+                customerId=customer_id, subscriptionId=sid, deletionType="transfer_to_direct"
             )
-            logger.info("google_reseller_subscription_cancelled", customer_id=customer_id, subscription_id=subscription_id)
+
+        try:
+            if len(subscription_ids) == 1:
+                self._execute_with_retry(lambda svc: request(svc, subscription_ids[0]).execute())
+            else:
+                # Google requires a customer's subscriptions to be transferred together in one batch.
+                errors: List[Exception] = []
+
+                def collect(_request_id, _response, exception):
+                    if exception is not None:
+                        errors.append(exception)
+
+                def run_batch(svc):
+                    batch = svc.new_batch_http_request(callback=collect)
+                    for sid in subscription_ids:
+                        batch.add(request(svc, sid))
+                    batch.execute()
+
+                self._execute_with_retry(run_batch)
+                if errors:
+                    raise errors[0]
+            logger.info("google_reseller_transferred_to_google", customer_id=customer_id,
+                        subscription_ids=subscription_ids)
         except HttpError as e:
-            logger.error("google_reseller_delete_error", customer_id=customer_id, status=e.status_code, error=str(e))
+            logger.error("google_reseller_transfer_error", customer_id=customer_id, status=e.status_code, error=str(e))
             raise
 
     async def change_plan(
