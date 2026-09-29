@@ -55,6 +55,15 @@ class LockRepository:
             return current.get("operation")
         return None
 
+    def renew(self, key: str, token: str, ttl_seconds: int) -> bool:
+        """Extend a lock we still hold (called from the job heartbeat)."""
+        doc_id = _safe_id(key)
+        current, version = self._store.get_versioned(self.COLLECTION, doc_id)
+        if not current or current.get("token") != token or version is None:
+            return False
+        current["expires_at"] = time.time() + ttl_seconds
+        return self._store.set_if_version(self.COLLECTION, doc_id, current, version)
+
     def release(self, key: str, token: str) -> None:
         """Release only if we still hold it (never remove a lock someone else took over)."""
         doc_id = _safe_id(key)

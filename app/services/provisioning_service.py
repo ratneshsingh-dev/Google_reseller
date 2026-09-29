@@ -183,7 +183,7 @@ class ProvisioningService:
             step_id = await self._start_step(job_id, "CREATE_SUBSCRIPTION")
 
             subscription, seats_added = await self._ensure_subscription_with_batching(
-                google_customer_id, request
+                google_customer_id, request, job_id
             )
             google_sub_id = subscription.subscription_id
 
@@ -376,8 +376,20 @@ class ProvisioningService:
     # Subscription management (with Google API seat batching)
     # ------------------------------------------------------------------
 
+    def _seats_before(self, job_id: Optional[str], current: int) -> int:
+        """Licences the customer had before THIS job changed anything, recorded on the first
+        attempt. A resumed job (after a crash) reuses it, so it charges exactly what the job
+        added even if Google already applied the change during the earlier attempt."""
+        job = self._job_repo.get_job(job_id) if job_id else None
+        if job is None:
+            return current
+        if job.seats_before is not None:
+            return job.seats_before
+        self._job_repo.update_fields(job_id, seats_before=current)
+        return current
+
     async def _ensure_subscription_with_batching(
-        self, customer_id: str, request: ProvisioningRequest
+        self, customer_id: str, request: ProvisioningRequest, job_id: Optional[str] = None
     ):
         """Create or retrieve subscription, scaling seats in batches of 100.
 
@@ -395,6 +407,7 @@ class ProvisioningService:
         for sub in existing_subs:
             if sub.sku_id == request.sku_id:
                 current = sub.seats.number_of_seats
+                before = self._seats_before(job_id, current)
                 logger.info(
                     "subscription_already_exists",
                     subscription_id=sub.subscription_id,
@@ -412,9 +425,10 @@ class ProvisioningService:
                     sub = await self._scale_seats(
                         customer_id, sub.subscription_id, current, total_needed
                     )
-                return sub, total_needed - current
+                return sub, max(0, total_needed - before)
 
         # Create new subscription with first batch (max 100)
+        before = self._seats_before(job_id, 0)
         initial_batch = min(total_needed, GOOGLE_MAX_SEATS_PER_CALL)
         try:
             subscription = await self._retry_operation(
@@ -448,7 +462,7 @@ class ProvisioningService:
                 customer_id, subscription.subscription_id, current_seats, total_needed
             )
 
-        return subscription, total_needed
+        return subscription, max(0, total_needed - before)
 
     async def _scale_seats(
         self,

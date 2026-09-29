@@ -13,6 +13,9 @@ rest of the reservation is refunded (all of it if the job failed) and the lock i
 
 from __future__ import annotations
 
+import socket
+import threading
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -20,7 +23,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import ValidationError
 
-from app.core import job_executor
+from app.core import job_dispatcher
+from app.core.config import get_settings
 from app.core.logging import get_logger
 from app.models.database import JobStatus, ProvisioningJobDocument
 from app.models.requests import ProvisioningRequest
@@ -119,11 +123,11 @@ class ProvisioningIntake:
                 reseller_id=reseller.reseller_id,
                 licences_reserved=seats,
                 batch_id=batch_id,
+                request_payload=request.model_dump(mode="json"),
+                lock_token=token,
+                settled=False,
             ))
-            job_executor.submit(
-                lambda: self._run(job_id, request, reseller.reseller_id, token, seats),
-                name=job_id,
-            )
+            job_dispatcher.dispatch(job_id, lambda: self.run_job(job_id))
         except Exception:
             self._resellers.increment_licences_used(reseller.reseller_id, -seats)
             self._locks.release(domain, token)
@@ -148,27 +152,100 @@ class ProvisioningIntake:
             ).model_dump(),
         }
 
-    async def _run(self, job_id: str, request: ProvisioningRequest, reseller_id: str, token: str, reserved: int) -> None:
-        """Runs on a worker thread. Always settles the quota and releases the lock."""
-        added = 0
+    # ------------------------------------------------------------------
+    # Running a job (same code for the in-memory pool and Cloud Tasks)
+    # ------------------------------------------------------------------
+
+    async def run_job(self, job_id: str) -> str:
+        """Run (or resume) a job from its stored record. Safe to call more than once:
+        a finished job is a no-op, a job another live worker holds returns "busy", and a
+        job whose worker died is taken over. Returns done | busy | missing | completed | failed.
+        """
+        settings = get_settings()
+        owner = f"{socket.gethostname()}:{uuid.uuid4().hex[:6]}"
+        lease = settings.job_heartbeat_seconds * 3
+        state = self._jobs.claim(job_id, owner, lease_seconds=lease)
+        if state != "claimed":
+            return state
+
+        job = self._jobs.get_job(job_id)
+        request = ProvisioningRequest(**job.request_payload)
+        stop = threading.Event()
+        beat = threading.Thread(target=self._heartbeat, args=(job, stop, settings.job_heartbeat_seconds),
+                                daemon=True, name=f"heartbeat-{job_id}")
+        beat.start()
+        charged, outcome = 0, "failed"
         try:
-            added = await self._service_factory().provision_company(request, job_id, reseller_id=reseller_id)
+            charged = await self._service_factory().provision_company(request, job_id, reseller_id=job.reseller_id)
+            outcome = "completed"
         except Exception as exc:
-            logger.error("job_failed", job_id=job_id, error=str(exc))
-            job = self._jobs.get_job(job_id)
-            added = job.licences_added if job else 0
-            if job and job.status not in _TERMINAL:
+            logger.error("job_failed", job_id=job_id, domain=job.primary_domain, attempt=job.attempts + 1,
+                         error=str(exc))
+            current = self._jobs.get_job(job_id)
+            charged = current.licences_added if current else 0
+            if current and current.status not in _TERMINAL:
                 self._jobs.update_job_status(job_id, JobStatus.FAILED.value, error_message=str(exc))
         finally:
-            refund = max(0, reserved - (added or 0))
+            stop.set()
+        self.settle(job_id, charged)
+        return outcome
+
+    def _heartbeat(self, job: ProvisioningJobDocument, stop: threading.Event, every: int) -> None:
+        """Prove the worker is alive and keep the domain lock from expiring while it runs."""
+        while not stop.wait(every):
             try:
-                if refund:
-                    self._resellers.increment_licences_used(reseller_id, -refund)
+                self._jobs.heartbeat(job.job_id)
+                if job.lock_token:
+                    self._locks.renew(job.primary_domain, job.lock_token, PROVISION_LOCK_SECONDS)
             except Exception as exc:
-                logger.error("quota_refund_failed", job_id=job_id, refund=refund, error=str(exc))
-            finally:
-                self._locks.release(request.primary_domain, token)
-            logger.info("job_settled", job_id=job_id, reserved=reserved, charged=added, refunded=refund)
+                logger.warning("heartbeat_failed", job_id=job.job_id, error=str(exc))
+
+    def settle(self, job_id: str, charged: int) -> None:
+        """Charge what Google actually added, refund the rest of the reservation and release the
+        domain lock. Guarded by the job's settled flag, so it happens exactly once."""
+        job = self._jobs.mark_settled(job_id, licences_added=charged)
+        if job is None:
+            return
+        refund = max(0, job.licences_reserved - (charged or 0))
+        try:
+            if refund:
+                self._resellers.increment_licences_used(job.reseller_id, -refund)
+        except Exception as exc:
+            logger.error("quota_refund_failed", job_id=job_id, refund=refund, error=str(exc))
+        finally:
+            if job.lock_token:
+                self._locks.release(job.primary_domain, job.lock_token)
+        logger.info("job_settled", job_id=job_id, reserved=job.licences_reserved, charged=charged, refunded=refund)
+
+    # ------------------------------------------------------------------
+    # Recovery: jobs whose worker died and will not be resumed
+    # ------------------------------------------------------------------
+
+    def reconcile_stale_jobs(self, stale_after_seconds: Optional[int] = None) -> List[str]:
+        """Fail jobs with no heartbeat for too long, recording the step they stopped at, and
+        settle their quota. Returns the job ids it failed."""
+        stale_after = stale_after_seconds or get_settings().job_stale_after_seconds
+        now = time.time()
+        failed = []
+        for job in self._jobs.list_unsettled():
+            last_seen = job.heartbeat_at or job.created_at.timestamp()
+            if now - last_seen < stale_after:
+                continue
+            step = job.status
+            if job.status not in _TERMINAL:
+                self._jobs.update_job_status(
+                    job_id=job.job_id,
+                    status=JobStatus.FAILED.value,
+                    error_message=(
+                        f"Interrupted: processing stopped during {step} and did not resume. "
+                        f"Check {job.primary_domain} and send the request again if needed."
+                    ),
+                )
+            logger.error("job_interrupted", job_id=job.job_id, domain=job.primary_domain, step=step,
+                         reseller_id=job.reseller_id, minutes_silent=int((now - last_seen) // 60))
+            self.settle(job.job_id, job.licences_added)
+            failed.append(job.job_id)
+        return failed
 
     # ------------------------------------------------------------------
     # Bulk

@@ -288,6 +288,41 @@ async def reseller_provision_csv(
 
 
 @router.get(
+    "/provision",
+    summary="List your provisioning jobs (filter by status, e.g. FAILED)",
+)
+@limiter.limit("120/minute")
+async def reseller_list_jobs(
+    request: Request,
+    status: Optional[str] = Query(None, description="e.g. FAILED, COMPLETED, PENDING"),
+    limit: int = Query(50, ge=1, le=200),
+    reseller: ResellerDocument = Depends(require_reseller_token),
+) -> dict:
+    """Newest first. Use status=FAILED to find jobs that need attention; each shows why it failed."""
+    jobs = await asyncio.to_thread(get_job_repo().list_by_reseller, reseller.reseller_id)
+    if status:
+        jobs = [j for j in jobs if j.status == status.upper()]
+    jobs.sort(key=lambda j: j.created_at, reverse=True)
+    return {
+        "total": len(jobs),
+        "jobs": [
+            {
+                "job_id": j.job_id,
+                "primary_domain": j.primary_domain,
+                "status": j.status,
+                "licences_requested": j.licences_reserved,
+                "licences_added": j.licences_added,
+                "attempts": j.attempts,
+                "batch_id": j.batch_id,
+                "error_message": j.error_message,
+                "created_at": j.created_at.isoformat() if j.created_at else None,
+            }
+            for j in jobs[:limit]
+        ],
+    }
+
+
+@router.get(
     "/provision/{job_id}",
     summary="Get provisioning job status",
 )

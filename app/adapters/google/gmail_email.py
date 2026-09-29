@@ -16,6 +16,8 @@ from typing import Any, Dict
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
+from app.adapters.google.http_client import authorized_http
+
 from app.services.email_service import EmailService
 
 _SCOPES = ["https://www.googleapis.com/auth/gmail.send"]
@@ -48,7 +50,7 @@ class GmailEmailService(EmailService):
         svc = getattr(self._local, "service", None)
         if svc is None:
             svc = self._local.service = build(
-                "gmail", "v1", credentials=self._credentials, cache_discovery=False
+                "gmail", "v1", http=authorized_http(self._credentials), cache_discovery=False
             )
         return svc
 

@@ -14,6 +14,8 @@ from typing import List, Optional
 import structlog
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+
+from app.adapters.google.http_client import authorized_http
 from googleapiclient.errors import HttpError
 
 from app.models.google_api import (
@@ -50,7 +52,7 @@ def _build_service(subject: Optional[str] = None):
         credentials = service_account.Credentials.from_service_account_file(creds_file, scopes=_SCOPES)
 
     delegated = credentials.with_subject(admin_email)
-    return build("admin", "directory_v1", credentials=delegated, cache_discovery=False)
+    return build("admin", "directory_v1", http=authorized_http(delegated), cache_discovery=False)
 
 
 def _parse_user(resp: dict) -> GoogleUser:

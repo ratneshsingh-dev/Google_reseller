@@ -14,6 +14,8 @@ from typing import List, Optional
 import structlog
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+
+from app.adapters.google.http_client import authorized_http
 from googleapiclient.errors import HttpError
 
 from app.models.google_api import (
@@ -54,7 +56,7 @@ def _build_service():
     # Impersonate the Workspace admin via Domain-Wide Delegation
     # The raw service account is not authorized as a reseller — the admin is
     delegated = credentials.with_subject(admin_email)
-    return build("reseller", "v1", credentials=delegated, cache_discovery=False)
+    return build("reseller", "v1", http=authorized_http(delegated), cache_discovery=False)
 
 
 def _parse_customer(resp: dict) -> GoogleCustomer:
