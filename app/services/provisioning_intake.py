@@ -179,8 +179,8 @@ class ProvisioningIntake:
             charged = await self._service_factory().provision_company(request, job_id, reseller_id=job.reseller_id)
             outcome = "completed"
         except Exception as exc:
-            logger.error("job_failed", job_id=job_id, domain=job.primary_domain, attempt=job.attempts + 1,
-                         error=str(exc))
+            logger.error("job_failed", job_id=job_id, domain=job.primary_domain, reseller_id=job.reseller_id,
+                         attempt=job.attempts + 1, error=str(exc))
             current = self._jobs.get_job(job_id)
             charged = current.licences_added if current else 0
             if current and current.status not in _TERMINAL:
