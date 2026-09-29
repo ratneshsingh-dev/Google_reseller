@@ -18,6 +18,7 @@ will skip already-completed steps and only retry failed operations.
 from __future__ import annotations
 
 import asyncio
+import random
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -70,8 +71,16 @@ from app.services.reseller_service import ResellerService
 
 logger = get_logger(__name__)
 
-MAX_RETRIES = 3
+MAX_RETRIES = 5
 RETRY_BASE_DELAY = 0.5  # seconds
+
+
+def _is_transient(exc: Exception) -> bool:
+    """Errors worth retrying: our own RetryableError, and Google rate-limit/server errors."""
+    if isinstance(exc, RetryableError):
+        return True
+    from googleapiclient.errors import HttpError
+    return isinstance(exc, HttpError) and exc.status_code in (429, 500, 502, 503, 504)
 GOOGLE_MAX_SEATS_PER_CALL = 100  # Google Reseller API seat limit per call
 
 
@@ -106,8 +115,11 @@ class ProvisioningService:
 
     async def provision_company(
         self, request: ProvisioningRequest, job_id: str, reseller_id: str | None = None
-    ) -> None:
+    ) -> int:
         """Execute the full provisioning workflow for a company.
+
+        Returns the number of licences actually added at Google. Quota is settled by the
+        caller (see ProvisioningIntake), which reserved it when the request was accepted.
 
         This method is designed to be called by the background worker.
         It updates the job document in Firestore as it progresses.
@@ -211,16 +223,9 @@ class ProvisioningService:
                 plan=request.plan,
                 sku_id=request.sku_id,
                 licensed_seats=request.license_count,
+                licences_added=seats_added,
             )
 
-            # ✅ Increment licence counter ONLY after Google confirms subscription success
-            if reseller_id and self._reseller_repo and seats_added > 0:
-                self._reseller_repo.increment_licences_used(reseller_id, seats_added)
-                logger.info(
-                    "licences_incremented_on_success",
-                    reseller_id=reseller_id,
-                    count=seats_added,
-                )
 
             # --- Step 4: Create admin user (optional — may fail for new reseller customers) ---
             await self._update_job(job_id, JobStatus.USER_PROVISIONING)
@@ -305,6 +310,7 @@ class ProvisioningService:
                 users_created=users_created,
                 users_failed=users_failed,
             )
+            return seats_added
 
         except Exception as exc:
             logger.error(
@@ -866,14 +872,17 @@ class ProvisioningService:
     # ------------------------------------------------------------------
 
     async def _retry_operation(self, operation, *args, **kwargs):
-        """Retry an async operation with exponential backoff on RetryableError."""
+        """Retry with exponential backoff + jitter on transient errors, including Google
+        rate limiting (429) and 5xx, which become common when many jobs run in parallel."""
         last_error = None
         for attempt in range(MAX_RETRIES):
             try:
                 return await operation(*args, **kwargs)
-            except RetryableError as exc:
+            except Exception as exc:
+                if not _is_transient(exc):
+                    raise
                 last_error = exc
-                delay = RETRY_BASE_DELAY * (2 ** attempt)
+                delay = RETRY_BASE_DELAY * (2 ** attempt) * random.uniform(0.8, 1.3)
                 logger.warning(
                     "retrying_operation",
                     operation=operation.__name__,

@@ -8,6 +8,7 @@ impersonate the reseller admin and manage users in customer domains.
 from __future__ import annotations
 
 import os
+import threading
 from typing import List, Optional
 
 import structlog
@@ -75,10 +76,22 @@ class GoogleDirectoryService(DirectoryService):
     """Real Google Admin SDK Directory API adapter using DWD."""
 
     def __init__(self) -> None:
-        # Default service uses the reseller admin account for DWD
+        # googleapiclient service objects are not thread-safe: one per worker thread.
+        self._local = threading.local()
         self._service = _build_service()
         self._admin_email = os.getenv("GOOGLE_ADMIN_EMAIL", "")
         logger.info("google_directory_initialized", admin=self._admin_email)
+
+    @property
+    def _service(self):
+        svc = getattr(self._local, "service", None)
+        if svc is None:
+            svc = self._local.service = _build_service()
+        return svc
+
+    @_service.setter
+    def _service(self, value) -> None:
+        self._local.service = value
 
     def _service_for_domain(self, domain: str):
         """Get a service impersonating the admin of a specific domain."""

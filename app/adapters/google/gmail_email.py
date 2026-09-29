@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import os
+import threading
 from email.mime.text import MIMEText
 from typing import Any, Dict
 
@@ -38,10 +39,18 @@ class GmailEmailService(EmailService):
             )
 
         # Impersonate the admin email via Domain-Wide Delegation
-        delegated_credentials = credentials.with_subject(self._admin_email)
-        self._service = build(
-            "gmail", "v1", credentials=delegated_credentials, cache_discovery=False
-        )
+        self._credentials = credentials.with_subject(self._admin_email)
+        self._local = threading.local()
+
+    @property
+    def _service(self):
+        # googleapiclient service objects are not thread-safe: one per worker thread.
+        svc = getattr(self._local, "service", None)
+        if svc is None:
+            svc = self._local.service = build(
+                "gmail", "v1", credentials=self._credentials, cache_discovery=False
+            )
+        return svc
 
     async def send_confirmation_email(
         self, recipient: str, subject: str, body: str

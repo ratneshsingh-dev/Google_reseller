@@ -9,6 +9,7 @@ updated after Google confirms, so the two never drift apart.
 from __future__ import annotations
 
 import uuid
+from contextlib import asynccontextmanager
 from typing import Any, Optional, Tuple
 
 from app.core.logging import get_logger
@@ -21,13 +22,15 @@ from app.models.google_api import (
 from app.models.reseller_models import AuditLogDocument, ResellerDocument
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.company_repository import CompanyRepository
-from app.repositories.reseller_repository import ResellerRepository
+from app.repositories.coordination_repository import LockRepository
+from app.repositories.reseller_repository import QuotaExceededError, ResellerRepository
 from app.repositories.subscription_repository import SubscriptionRepository
 from app.services.reseller_service import ResellerService
 
 logger = get_logger(__name__)
 
 GOOGLE_MAX_SEATS_PER_CALL = 100
+DOMAIN_ACTION_LOCK_SECONDS = 3 * 60
 REDUCIBLE_PLANS = {"FLEXIBLE"}
 RESELLER_SUSPENSION = "RESELLER_INITIATED"
 
@@ -63,24 +66,61 @@ class DomainService:
         subscription_repo: SubscriptionRepository,
         reseller_repo: ResellerRepository,
         audit_repo: AuditRepository,
+        lock_repo: LockRepository,
     ) -> None:
         self._google = reseller_service
         self._companies = company_repo
         self._subscriptions = subscription_repo
         self._resellers = reseller_repo
         self._audit = audit_repo
+        self._locks = lock_repo
 
     # ------------------------------------------------------------------
-    # Public actions
+    # Public actions (each holds the domain lock, so actions on one domain never overlap)
     # ------------------------------------------------------------------
 
     async def suspend(self, domain: str, reseller: ResellerDocument, ip: str = "") -> dict:
-        return await self._set_status(domain, reseller, ip, suspend=True)
+        async with self._domain_lock(domain, "suspend"):
+            return await self._set_status(domain, reseller, ip, suspend=True)
 
     async def activate(self, domain: str, reseller: ResellerDocument, ip: str = "") -> dict:
-        return await self._set_status(domain, reseller, ip, suspend=False)
+        async with self._domain_lock(domain, "activate"):
+            return await self._set_status(domain, reseller, ip, suspend=False)
 
     async def change_licences(
+        self, domain: str, reseller: ResellerDocument, target: int, ip: str = ""
+    ) -> dict:
+        async with self._domain_lock(domain, "change_licences"):
+            return await self._change_licences(domain, reseller, target, ip)
+
+    async def delete(
+        self, domain: str, reseller: ResellerDocument, confirm: Optional[str], ip: str = ""
+    ) -> dict:
+        if (confirm or "").strip().lower() != domain.strip().lower():
+            raise DomainActionError(
+                400,
+                "Deleting cancels all subscriptions immediately and cannot be undone. "
+                f"To confirm, repeat the domain: DELETE /api/v1/reseller/domains/{domain}?confirm={domain}",
+            )
+        async with self._domain_lock(domain, "delete"):
+            return await self._delete(domain, reseller, ip)
+
+    @asynccontextmanager
+    async def _domain_lock(self, domain: str, operation: str):
+        key = domain.strip().lower()
+        token = self._locks.acquire(key, operation, DOMAIN_ACTION_LOCK_SECONDS)
+        if not token:
+            busy = self._locks.holder(key) or "another operation"
+            raise DomainActionError(409, {
+                "error": "Domain busy",
+                "detail": f"{domain} is busy ({busy} in progress). Wait for it to finish, then try again.",
+            })
+        try:
+            yield
+        finally:
+            self._locks.release(key, token)
+
+    async def _change_licences(
         self, domain: str, reseller: ResellerDocument, target: int, ip: str = ""
     ) -> dict:
         """Set a new TOTAL. Increases work on any plan; decreases only on FLEXIBLE."""
@@ -99,25 +139,23 @@ class DomainService:
                 f"Licences can only be reduced on the FLEXIBLE plan. "
                 f"{company.primary_domain} is on {plan}.",
             )
-        if delta > 0 and delta > reseller.licences_remaining:
-            raise DomainActionError(400, {
-                "error": "Licence cap exceeded",
-                "detail": (
-                    f"Cannot add {delta} licence(s). You have {reseller.licences_remaining} "
-                    f"remaining out of {reseller.max_licence_cap}."
-                ),
-                "quota": {
-                    "requested": delta,
-                    "licences_used": reseller.licences_used,
-                    "max_licence_cap": reseller.max_licence_cap,
-                    "licences_remaining": reseller.licences_remaining,
-                },
-            })
+        if delta > 0:
+            # Reserve before calling Google so parallel requests can never overshoot the cap.
+            try:
+                self._resellers.adjust_licences_used(reseller.reseller_id, delta, enforce_cap=True)
+            except QuotaExceededError as exc:
+                raise DomainActionError(400, exc.as_detail())
 
-        await self._google_call(self._resize, company.google_customer_id, sub.subscription_id,
-                                current, target, plan)
+        try:
+            await self._google_call(self._resize, company.google_customer_id, sub.subscription_id,
+                                    current, target, plan)
+        except DomainActionError:
+            if delta > 0:
+                self._resellers.increment_licences_used(reseller.reseller_id, -delta)
+            raise
 
-        self._resellers.increment_licences_used(reseller.reseller_id, delta)
+        if delta < 0:
+            self._resellers.increment_licences_used(reseller.reseller_id, delta)
         if local:
             self._subscriptions.update(local.subscription_id, {"seats": target})
         self._record(reseller.reseller_id, "LICENCES_CHANGED", company.primary_domain, ip,
@@ -128,17 +166,8 @@ class DomainService:
         return self._licence_result(company, plan, current, target, reseller,
                                     f"{company.primary_domain} now has {target} licences ({sign}{delta}).")
 
-    async def delete(
-        self, domain: str, reseller: ResellerDocument, confirm: Optional[str], ip: str = ""
-    ) -> dict:
+    async def _delete(self, domain: str, reseller: ResellerDocument, ip: str = "") -> dict:
         """Cancel every subscription on the domain and return its licences to the quota."""
-        if (confirm or "").strip().lower() != domain.strip().lower():
-            raise DomainActionError(
-                400,
-                "Deleting cancels all subscriptions immediately and cannot be undone. "
-                f"To confirm, repeat the domain: DELETE /api/v1/reseller/domains/{domain}?confirm={domain}",
-            )
-
         company = self._owned_company(domain, reseller)
         google_subs = await self._google_call(self._google.list_subscriptions, company.google_customer_id)
 

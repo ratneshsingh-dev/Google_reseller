@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import datetime
 import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import google.auth
 import google.auth.transport.requests
@@ -127,13 +127,34 @@ class BaseStore:
     def list_all(self, collection: str) -> List[Dict[str, Any]]:
         raise NotImplementedError
 
+    # --- Optimistic concurrency (compare-and-swap) ---
+
+    def get_versioned(self, collection: str, doc_id: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """Return the document and an opaque version token (None if the document does not exist)."""
+        raise NotImplementedError
+
+    def set_if_version(self, collection: str, doc_id: str, data: Dict[str, Any], version: Optional[str]) -> bool:
+        """Write the whole document only if it is unchanged since `version` was read.
+
+        version=None means "only if the document does not exist yet". Returns False on conflict.
+        """
+        raise NotImplementedError
+
+    def delete_if_version(self, collection: str, doc_id: str, version: str) -> bool:
+        raise NotImplementedError
+
 
 class InMemoryStore(BaseStore):
     """Thread-safe in-memory storage for local development/testing."""
 
     def __init__(self) -> None:
         self._data: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self._versions: Dict[Tuple[str, str], int] = {}
         self._lock = threading.Lock()
+
+    def _bump(self, collection: str, doc_id: str) -> None:
+        key = (collection, doc_id)
+        self._versions[key] = self._versions.get(key, 0) + 1
 
     def get(self, collection: str, doc_id: str) -> Optional[Dict[str, Any]]:
         with self._lock:
@@ -144,6 +165,7 @@ class InMemoryStore(BaseStore):
             if collection not in self._data:
                 self._data[collection] = {}
             self._data[collection][doc_id] = data.copy()
+            self._bump(collection, doc_id)
 
     def update(self, collection: str, doc_id: str, data: Dict[str, Any]) -> None:
         with self._lock:
@@ -152,11 +174,40 @@ class InMemoryStore(BaseStore):
             existing = self._data[collection].get(doc_id, {})
             existing.update(data)
             self._data[collection][doc_id] = existing
+            self._bump(collection, doc_id)
 
     def delete(self, collection: str, doc_id: str) -> None:
         with self._lock:
             if collection in self._data:
                 self._data[collection].pop(doc_id, None)
+            self._versions.pop((collection, doc_id), None)
+
+    def get_versioned(self, collection: str, doc_id: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        with self._lock:
+            doc = self._data.get(collection, {}).get(doc_id)
+            if doc is None:
+                return None, None
+            return doc.copy(), str(self._versions.get((collection, doc_id), 0))
+
+    def set_if_version(self, collection: str, doc_id: str, data: Dict[str, Any], version: Optional[str]) -> bool:
+        with self._lock:
+            exists = doc_id in self._data.get(collection, {})
+            if version is None:
+                if exists:
+                    return False
+            elif not exists or str(self._versions.get((collection, doc_id), 0)) != version:
+                return False
+            self._data.setdefault(collection, {})[doc_id] = data.copy()
+            self._bump(collection, doc_id)
+            return True
+
+    def delete_if_version(self, collection: str, doc_id: str, version: str) -> bool:
+        with self._lock:
+            if str(self._versions.get((collection, doc_id), -1)) != version:
+                return False
+            self._data.get(collection, {}).pop(doc_id, None)
+            self._versions.pop((collection, doc_id), None)
+            return True
 
     def query(
         self,
@@ -260,19 +311,59 @@ class FirestoreStore(BaseStore):
             resp.raise_for_status()
 
     def update(self, collection: str, doc_id: str, data: Dict[str, Any]) -> None:
-        # Fetch existing, merge, and patch
-        existing = self.get(collection, doc_id) or {}
-        existing.update(data)
-        try:
-            self.set(collection, doc_id, existing)
-        except Exception as exc:
-            logger.error("firestore_update_error", collection=collection, doc_id=doc_id, error=str(exc))
+        # Field-level PATCH (updateMask): only the given fields change, atomically, with no
+        # read-merge-write. A full rewrite here would let concurrent writers erase each other.
+        url = f"{self._base_url}/{collection}/{doc_id}"
+        params = [("updateMask.fieldPaths", field) for field in data]
+        resp = requests.patch(url, headers=self._get_headers(), params=params, json=_dict_to_firestore_doc(data))
+        if resp.status_code not in (200, 201):
+            logger.error("firestore_update_error", collection=collection, doc_id=doc_id,
+                         status=resp.status_code, text=resp.text)
 
     def delete(self, collection: str, doc_id: str) -> None:
         url = f"{self._base_url}/{collection}/{doc_id}"
         resp = requests.delete(url, headers=self._get_headers())
         if resp.status_code not in (200, 204, 404):
             logger.error("firestore_delete_error", status=resp.status_code, text=resp.text)
+
+    def get_versioned(self, collection: str, doc_id: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        url = f"{self._base_url}/{collection}/{doc_id}"
+        resp = requests.get(url, headers=self._get_headers())
+        if resp.status_code == 404:
+            return None, None
+        resp.raise_for_status()
+        raw = resp.json()
+        return _firestore_doc_to_dict(raw), raw.get("updateTime")
+
+    @staticmethod
+    def _precondition_failed(resp: requests.Response) -> bool:
+        # Firestore reports a lost race as 400 FAILED_PRECONDITION, 409 ALREADY_EXISTS or 404 NOT_FOUND.
+        return resp.status_code in (400, 404, 409) and any(
+            s in resp.text for s in ("FAILED_PRECONDITION", "ALREADY_EXISTS", "NOT_FOUND")
+        )
+
+    def set_if_version(self, collection: str, doc_id: str, data: Dict[str, Any], version: Optional[str]) -> bool:
+        url = f"{self._base_url}/{collection}/{doc_id}"
+        params = {"currentDocument.exists": "false"} if version is None else {"currentDocument.updateTime": version}
+        resp = requests.patch(url, headers=self._get_headers(), params=params, json=_dict_to_firestore_doc(data))
+        if resp.status_code in (200, 201):
+            return True
+        if self._precondition_failed(resp):
+            return False
+        logger.error("firestore_cas_error", collection=collection, doc_id=doc_id, status=resp.status_code, text=resp.text)
+        resp.raise_for_status()
+        return False
+
+    def delete_if_version(self, collection: str, doc_id: str, version: str) -> bool:
+        url = f"{self._base_url}/{collection}/{doc_id}"
+        resp = requests.delete(url, headers=self._get_headers(), params={"currentDocument.updateTime": version})
+        if resp.status_code in (200, 204):
+            return True
+        if self._precondition_failed(resp):
+            return False
+        logger.error("firestore_cas_delete_error", collection=collection, doc_id=doc_id, status=resp.status_code)
+        resp.raise_for_status()
+        return False
 
     def query(
         self,

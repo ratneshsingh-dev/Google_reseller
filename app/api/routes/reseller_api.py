@@ -55,19 +55,18 @@ from typing import Any, List, Optional
 
 from fastapi import (
     APIRouter,
-    BackgroundTasks,
     Depends,
     File,
     Form,
+    Header,
     HTTPException,
     Query,
     Request,
     UploadFile,
 )
 
+from app.core import job_executor
 from app.core.auth_middleware import (
-    build_quota_summary,
-    check_licence_cap,
     require_reseller_token,
     require_role,
 )
@@ -76,30 +75,23 @@ from app.core.rate_limit import limiter
 from app.dependencies import (
     get_audit_repo,
     get_company_repo,
+    get_domain_service,
     get_employee_repo,
     get_job_repo,
-    get_provisioning_service,
-    get_domain_service,
+    get_provisioning_intake,
     get_reseller_repo,
     get_subscription_repo,
 )
-from app.models.database import JobStatus, ProvisioningJobDocument
-from app.models.requests import ProvisioningRequest
+from app.models.requests import BulkProvisioningRequest, ProvisioningRequest
 from app.models.reseller_models import (
     AuditLogDocument,
     ChangeLicencesRequest,
     QuotaResponse,
-    QuotaSummary,
     ResellerDocument,
     ResellerRole,
 )
-from app.models.responses import (
-    CompanyDetailResponse,
-    EmployeeStatusResponse,
-    ProvisioningStepResponse,
-)
 from app.services.domain_service import DomainActionError
-from app.workers import run_provisioning_job
+from app.services.provisioning_intake import IntakeError
 
 logger = get_logger(__name__)
 
@@ -141,84 +133,79 @@ def _log_audit(
 # ---------------------------------------------------------------------------
 
 
+async def _accept(make_result) -> dict:
+    """Run a blocking intake call on a worker thread and translate refusals to HTTP."""
+    try:
+        return await asyncio.to_thread(make_result)
+    except IntakeError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
 @router.post(
     "/provision",
     status_code=202,
     summary="Provision a company (creates Google Workspace customer + subscription)",
 )
-@limiter.limit("10/minute")
+@limiter.limit("120/minute")
 async def reseller_provision(
     request_body: ProvisioningRequest,
     request: Request,
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
     reseller: ResellerDocument = Depends(require_role(ResellerRole.RESELLER_FULL)),
 ) -> dict:
-    """Provision a new Google Workspace company for your client.
+    """Queue provisioning for one company and return its **job_id** immediately.
 
-    - Enforces your licence cap. Returns quota feedback on every call.
-    - Internally batches Google API calls (100 seats per call) so you can
-      request any number in a single API call.
-    - Returns immediately with a **job_id** — use GET /provision/{job_id} to
-      poll for completion.
+    - Licences are reserved atomically, so parallel requests can never exceed your cap.
+    - Only one operation per domain at a time: a second request for the same domain gets 409.
+    - Send an **Idempotency-Key** header to make retries safe: the same key returns the same job.
+    - Poll GET /provision/{job_id} for progress.
     """
-    ip = request.client.host if request.client else ""
-    job_repo = get_job_repo()
-    audit_repo = get_audit_repo()
-    reseller_repo = get_reseller_repo()
+    intake = get_provisioning_intake()
+    return await _accept(lambda: intake.accept(
+        reseller, request_body, idempotency_key=idempotency_key, ip=_client_ip(request)
+    ))
 
-    # Enforce licence cap BEFORE provisioning
-    check_licence_cap(reseller, request_body.license_count)
 
-    # Build quota summary (will be returned in response)
-    quota = build_quota_summary(reseller, request_body.license_count)
+# ---------------------------------------------------------------------------
+# POST /provision/bulk — many companies in one call, processed in parallel
+# ---------------------------------------------------------------------------
 
-    # Create provisioning job
-    job_id = f"JOB-{uuid.uuid4().hex[:8].upper()}"
-    job = ProvisioningJobDocument(
-        job_id=job_id,
-        company_name=request_body.company_name,
-        primary_domain=request_body.primary_domain,
-        status=JobStatus.PENDING.value,
-        reseller_id=reseller.reseller_id,
-    )
-    job_repo.create_job(job)
 
-    # Dispatch provisioning in background
-    provisioning_service = get_provisioning_service()
-    asyncio.create_task(
-        run_provisioning_job(
-            provisioning_service,
-            job_repo,
-            job_id,
-            request_body,
-            reseller_id=reseller.reseller_id,
-        )
-    )
+@router.post(
+    "/provision/bulk",
+    status_code=202,
+    summary="Provision up to 100 companies in one call (processed in parallel)",
+)
+@limiter.limit("10/minute")
+async def reseller_provision_bulk(
+    body: BulkProvisioningRequest,
+    request: Request,
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
+    reseller: ResellerDocument = Depends(require_role(ResellerRole.RESELLER_FULL)),
+) -> dict:
+    """Every item is validated and accepted on its own: one bad item does not reject the rest.
 
-    # Audit log
-    _log_audit(
-        audit_repo,
-        reseller_id=reseller.reseller_id,
-        action="PROVISION",
-        resource_type="job",
-        resource_id=job_id,
-        licences_requested=request_body.license_count,
-        status="SUCCESS",
-        ip=ip,
-        details={"company": request_body.company_name, "domain": request_body.primary_domain},
-    )
+    Returns a **batch_id** and one result per item (a job_id, or the reason it was refused).
+    Track everything with GET /provision/batch/{batch_id}.
+    """
+    intake = get_provisioning_intake()
+    return await _accept(lambda: intake.accept_bulk(
+        reseller, body.requests, idempotency_key=idempotency_key, ip=_client_ip(request)
+    ))
 
-    logger.info(
-        "reseller_provision_accepted",
-        reseller_id=reseller.reseller_id,
-        job_id=job_id,
-        licences=request_body.license_count,
-    )
 
-    return {
-        "job_id": job_id,
-        "status": "PENDING",
-        "quota_summary": quota.model_dump(),
-    }
+@router.get(
+    "/provision/batch/{batch_id}",
+    summary="Progress of every job in a bulk request",
+)
+@limiter.limit("600/minute")
+async def reseller_batch_status(
+    batch_id: str,
+    request: Request,
+    reseller: ResellerDocument = Depends(require_reseller_token),
+) -> dict:
+    intake = get_provisioning_intake()
+    return await _accept(lambda: intake.batch_status(reseller, batch_id))
 
 
 # ---------------------------------------------------------------------------
@@ -231,23 +218,14 @@ async def reseller_provision(
     status_code=202,
     summary="Provision a company via CSV upload",
 )
-@limiter.limit("10/minute")
+@limiter.limit("60/minute")
 async def reseller_provision_csv(
     request: Request,
-    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     license_count: Optional[int] = Form(None),
     reseller: ResellerDocument = Depends(require_role(ResellerRole.RESELLER_FULL)),
 ) -> dict:
-    """Provision a company by uploading a CSV file.
-
-    The CSV should follow the same format as the admin CSV endpoint.
-    Licence cap is enforced based on the license_count in the CSV or form field.
-    """
-    ip = request.client.host if request.client else ""
-    audit_repo = get_audit_repo()
-    job_repo = get_job_repo()
-
+    """Provision a company from the first row of a CSV file (same rules as POST /provision)."""
     if not file.filename or not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Uploaded file must be a .csv file.")
 
@@ -266,10 +244,6 @@ async def reseller_provision_csv(
         or (int(row["license_count"]) if row.get("license_count", "").isdigit() else None)
         or 5
     )
-
-    # Enforce licence cap
-    check_licence_cap(reseller, final_licence_count)
-    quota = build_quota_summary(reseller, final_licence_count)
 
     # Build provisioning request from CSV
     final_domain = row.get("primary_domain") or row.get("domain", "")
@@ -302,44 +276,10 @@ async def reseller_provision_csv(
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
-    job_id = f"JOB-{uuid.uuid4().hex[:8].upper()}"
-    job = ProvisioningJobDocument(
-        job_id=job_id,
-        company_name=req.company_name,
-        primary_domain=req.primary_domain,
-        status=JobStatus.PENDING.value,
-        reseller_id=reseller.reseller_id,
-    )
-    job_repo.create_job(job)
-
-    provisioning_service = get_provisioning_service()
-    background_tasks.add_task(
-        run_provisioning_job,
-        provisioning_service,
-        job_repo,
-        job_id,
-        req,
-        reseller_id=reseller.reseller_id,
-    )
-
-    _log_audit(
-        audit_repo,
-        reseller_id=reseller.reseller_id,
-        action="PROVISION_CSV",
-        resource_type="job",
-        resource_id=job_id,
-        licences_requested=final_licence_count,
-        status="SUCCESS",
-        ip=ip,
-    )
-
-    return {
-        "job_id": job_id,
-        "status": "PENDING",
-        "company_name": req.company_name,
-        "primary_domain": req.primary_domain,
-        "quota_summary": quota.model_dump(),
-    }
+    intake = get_provisioning_intake()
+    result = await _accept(lambda: intake.accept(reseller, req, ip=_client_ip(request)))
+    result["company_name"] = req.company_name
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +291,7 @@ async def reseller_provision_csv(
     "/provision/{job_id}",
     summary="Get provisioning job status",
 )
+@limiter.limit("600/minute")
 async def reseller_get_job_status(
     job_id: str,
     request: Request,
@@ -575,8 +516,9 @@ async def reseller_get_company(
 
 
 async def _run_domain_action(coro) -> dict:
+    """Run on a worker thread: Google/Firestore calls block, and must not stall other requests."""
     try:
-        return await coro
+        return await job_executor.run_in_worker(lambda: coro)
     except DomainActionError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
@@ -586,7 +528,7 @@ def _client_ip(request: Request) -> str:
 
 
 @router.post("/domains/{domain}/suspend", summary="Suspend a domain's Google Workspace subscription")
-@limiter.limit("10/minute")
+@limiter.limit("60/minute")
 async def suspend_domain(
     domain: str,
     request: Request,
@@ -597,7 +539,7 @@ async def suspend_domain(
 
 
 @router.post("/domains/{domain}/activate", summary="Reactivate a suspended domain")
-@limiter.limit("10/minute")
+@limiter.limit("60/minute")
 async def activate_domain(
     domain: str,
     request: Request,
@@ -607,7 +549,7 @@ async def activate_domain(
 
 
 @router.patch("/domains/{domain}/licences", summary="Change the total licences on a domain")
-@limiter.limit("10/minute")
+@limiter.limit("60/minute")
 async def change_domain_licences(
     domain: str,
     body: ChangeLicencesRequest,
@@ -621,7 +563,7 @@ async def change_domain_licences(
 
 
 @router.delete("/domains/{domain}", summary="Delete a domain (cancels its subscriptions)")
-@limiter.limit("10/minute")
+@limiter.limit("60/minute")
 async def delete_domain(
     domain: str,
     request: Request,

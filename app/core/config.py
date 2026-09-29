@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     # --- Service adapter ---
     service_adapter: str = "mock"  # "mock" | "google"
 
+    # --- Background jobs ---
+    job_concurrency: int = 25          # provisioning jobs running at the same time per server
+    bulk_max_items: int = 100          # domains accepted in one bulk request
+
     # --- Mock failure simulation ---
     mock_failure_mode: bool = False
     mock_failure_rate: float = 0.0  # 0.0 to 1.0

@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
+from app.core import job_executor
 from app.core.jwt_service import create_access_token, create_admin_view_token
-from app.dependencies import get_job_repo, get_provisioning_service, get_reseller_repo
-from app.models.database import ProvisioningJobDocument
+from app.dependencies import get_provisioning_intake, get_reseller_repo
 from app.models.requests import ProvisioningRequest
 from app.models.reseller_models import ResellerDocument
 
@@ -32,10 +30,9 @@ def _provision(domain: str, plan: str, seats: int, reseller_id: str) -> None:
         initiated_by_email="ops@partner.test", econz_notification_email="ops@partner.test",
         admin_first_name="Ada", admin_last_name="Admin",
     )
-    job_id = f"JOB-{domain[:8].upper()}"
-    get_job_repo().create_job(ProvisioningJobDocument(
-        job_id=job_id, company_name=domain, primary_domain=domain, status="PENDING", reseller_id=reseller_id))
-    asyncio.run(get_provisioning_service().provision_company(request, job_id, reseller_id=reseller_id))
+    reseller = get_reseller_repo().get_by_id(reseller_id)
+    get_provisioning_intake().accept(reseller, request)
+    assert job_executor.wait_until_idle(timeout=30)
 
 
 def _used(reseller_id: str) -> int:

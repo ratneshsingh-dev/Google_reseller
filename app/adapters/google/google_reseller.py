@@ -8,6 +8,7 @@ account credentials scoped to apps.order.
 from __future__ import annotations
 
 import os
+import threading
 from typing import List, Optional
 
 import structlog
@@ -108,9 +109,22 @@ class GoogleResellerService(ResellerService):
     """Real Google Workspace Reseller API adapter."""
 
     def __init__(self) -> None:
+        # googleapiclient service objects are not thread-safe: one per worker thread.
+        self._local = threading.local()
         self._service = _build_service()
         admin_email = os.getenv("GOOGLE_ADMIN_EMAIL", "")
         logger.info("google_reseller_initialized", delegated_as=admin_email)
+
+    @property
+    def _service(self):
+        svc = getattr(self._local, "service", None)
+        if svc is None:
+            svc = self._local.service = _build_service()
+        return svc
+
+    @_service.setter
+    def _service(self, value) -> None:
+        self._local.service = value
 
     def _execute_with_retry(self, request_fn, max_retries: int = 3):
         """Execute a Google API request with retry on SSL/connection errors.

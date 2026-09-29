@@ -38,8 +38,11 @@ def reset_state():
     from app.core.config import get_settings
 
     # Clear caches
+    from app.core import job_executor
     from app.core.rate_limit import limiter
 
+    job_executor.wait_until_idle(timeout=30)
+    job_executor.reset()
     get_settings.cache_clear()
     reset_store()
     reset_dependencies()

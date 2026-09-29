@@ -122,6 +122,9 @@ class ProvisioningJobDocument(BaseModel):
     plan: Optional[str] = None
     sku_id: Optional[str] = None
     licensed_seats: Optional[int] = None
+    licences_reserved: int = 0         # quota held for this job while it runs
+    licences_added: int = 0            # licences Google actually added (what the partner is charged)
+    batch_id: Optional[str] = None
     users_created: int = 0
     users_failed: int = 0
     users_existing: int = 0
