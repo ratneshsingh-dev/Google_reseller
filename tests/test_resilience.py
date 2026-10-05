@@ -140,6 +140,56 @@ class TestJobsSurviveTemporaryErrors:
         assert get_reseller_repo().get_by_id("RSL-R1").licences_used == 2
 
 
+class TestMakeAdminRightAfterCreate:
+    """Google can return 404 "Resource Not Found: userKey" from makeAdmin for a user created a
+    second earlier (eventual consistency). That must be retried, not treated as final."""
+
+    @pytest.fixture(autouse=True)
+    def instant_waits(self, monkeypatch):
+        import app.services.provisioning_service as ps
+
+        async def instant(_seconds):
+            return None
+        monkeypatch.setattr(ps.asyncio, "sleep", instant)
+
+    def _run_with_make_admin(self, monkeypatch, behaviour):
+        from app.dependencies import get_directory_service
+        directory = get_directory_service()
+        original = directory.make_admin
+        calls = {"n": 0}
+
+        async def make_admin(email):
+            calls["n"] += 1
+            error = behaviour(calls["n"])
+            if error:
+                raise error
+            return await original(email)
+
+        monkeypatch.setattr(directory, "make_admin", make_admin)
+        result = get_provisioning_intake().accept(_reseller(), _request("makeadmin.test"))
+        assert job_executor.wait_until_idle(30)
+        jobs = get_job_repo()
+        job = jobs.get_job(result["job_id"])
+        step = next(s for s in jobs.get_steps_for_job(job.job_id) if s.step_name == "CREATE_USERS")
+        admin_status = step.details.rsplit("Status: ", 1)[-1].strip()
+        return job, admin_status, calls["n"]
+
+    def test_not_found_twice_then_admin_is_granted(self, client, monkeypatch):
+        job, admin_status, calls = self._run_with_make_admin(
+            monkeypatch, lambda n: http_error(404, "notFound") if n <= 2 else None)
+        assert job.status == "COMPLETED" and admin_status == "PROVISIONED" and calls == 3
+
+    def test_permanent_error_is_not_retried(self, client, monkeypatch):
+        job, admin_status, calls = self._run_with_make_admin(
+            monkeypatch, lambda n: http_error(403, "forbidden"))
+        assert admin_status == "FAILED" and calls == 1
+
+    def test_gives_up_after_the_last_wait(self, client, monkeypatch):
+        job, admin_status, calls = self._run_with_make_admin(
+            monkeypatch, lambda n: http_error(404, "notFound"))
+        assert admin_status == "FAILED" and calls == 4
+
+
 class TestActivityWrite:
     def test_last_api_call_is_written_at_most_once_a_minute(self, client, monkeypatch):
         _reseller()

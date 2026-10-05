@@ -17,6 +17,7 @@ will skip already-completed steps and only retry failed operations.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -29,6 +30,7 @@ from app.core.exceptions import (
     InsufficientSeatsError,
     SeatReductionNotAllowedError,
     SubscriptionAlreadyExistsError,
+    UserNotFoundError,
 )
 from app.core.logging import get_logger
 from app.core.security import (
@@ -71,6 +73,14 @@ from app.services.reseller_service import ResellerService
 logger = get_logger(__name__)
 
 GOOGLE_MAX_SEATS_PER_CALL = 100  # Google Reseller API seat limit per call
+MAKE_ADMIN_NOT_FOUND_WAITS = (2, 4, 8, 16)  # seconds; the last entry is never slept
+
+
+def _is_not_found(exc: Exception) -> bool:
+    if isinstance(exc, UserNotFoundError):
+        return True
+    from googleapiclient.errors import HttpError
+    return isinstance(exc, HttpError) and exc.status_code == 404
 
 
 class ProvisioningService:
@@ -656,10 +666,7 @@ class ProvisioningService:
             existing_emails.add(corporate_email)
 
             if is_admin:
-                await self._retry_operation(
-                    self._directory.make_admin,
-                    corporate_email
-                )
+                await self._make_admin(corporate_email)
 
             logger.info(
                 "employee_provisioned",
@@ -873,6 +880,21 @@ class ProvisioningService:
     # ------------------------------------------------------------------
     # Retry logic
     # ------------------------------------------------------------------
+
+    async def _make_admin(self, email: str) -> None:
+        """Grant super-admin to a user created moments ago. Google can briefly answer
+        "Resource Not Found: userKey" until the new user is visible to makeAdmin
+        (eventual consistency), so a not-found here is retried after a short wait."""
+        for attempt, wait in enumerate(MAKE_ADMIN_NOT_FOUND_WAITS):
+            try:
+                await self._retry_operation(self._directory.make_admin, email)
+                return
+            except Exception as exc:
+                if not _is_not_found(exc) or attempt == len(MAKE_ADMIN_NOT_FOUND_WAITS) - 1:
+                    raise
+                logger.warning("make_admin_user_not_visible_yet", email=email,
+                               attempt=attempt + 1, retry_in_seconds=wait)
+                await asyncio.sleep(wait)
 
     async def _retry_operation(self, operation, *args, **kwargs):
         """Retry temporary failures (Google rate limits incl. 403 rateLimitExceeded, 5xx,
