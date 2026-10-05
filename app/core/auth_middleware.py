@@ -48,10 +48,15 @@ _bearer_scheme = HTTPBearer(auto_error=False)
 # ---------------------------------------------------------------------------
 
 
-async def require_reseller_token(
+LAST_CALL_WRITE_INTERVAL_SECONDS = 60
+
+
+def require_reseller_token(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
 ) -> ResellerDocument:
+    # Plain `def` on purpose: FastAPI runs it in a worker thread, so its blocking database
+    # calls never stall the event loop that serves every other request.
     """FastAPI dependency: authenticate reseller via JWT Bearer token.
 
     Steps:
@@ -131,10 +136,16 @@ async def require_reseller_token(
             detail="Your reseller account has been deactivated. Contact admin.",
         )
 
-    # Update last_api_call_at (best-effort)
+    # Record activity at most once a minute. Writing on every request made the partner's
+    # record a write hot-spot (Firestore sustains ~1 write/s per document) and slowed every call.
     try:
         from datetime import datetime, timezone
-        repo.update(reseller_id, {"last_api_call_at": datetime.now(timezone.utc).isoformat()})
+        now = datetime.now(timezone.utc)
+        last = reseller.last_api_call_at
+        if last is not None and last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        if last is None or (now - last).total_seconds() >= LAST_CALL_WRITE_INTERVAL_SECONDS:
+            repo.update(reseller_id, {"last_api_call_at": now.isoformat()})
     except Exception:
         pass
 

@@ -12,6 +12,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Optional, Tuple
 
+from app.core.google_retry import call_with_retry
 from app.core.logging import get_logger
 from app.models.database import CompanyDocument, SubscriptionDocument
 from app.models.google_api import (
@@ -314,9 +315,10 @@ class DomainService:
             )
 
     async def _google_call(self, fn, *args):
-        """Run a Google call and turn any failure into a partner-facing error."""
+        """Run a Google call (retrying temporary failures) and turn any failure into a
+        partner-facing error."""
         try:
-            return await fn(*args)
+            return await call_with_retry(fn, *args)
         except DomainActionError:
             raise
         except Exception as exc:

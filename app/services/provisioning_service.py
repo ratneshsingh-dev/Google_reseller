@@ -17,17 +17,16 @@ will skip already-completed steps and only retry failed operations.
 
 from __future__ import annotations
 
-import asyncio
-import random
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
+
+from app.core.google_retry import call_with_retry
 
 from app.core.exceptions import (
     CustomerAlreadyExistsError,
     DuplicateEmployeeError,
     InsufficientSeatsError,
-    RetryableError,
     SeatReductionNotAllowedError,
     SubscriptionAlreadyExistsError,
 )
@@ -71,16 +70,6 @@ from app.services.reseller_service import ResellerService
 
 logger = get_logger(__name__)
 
-MAX_RETRIES = 5
-RETRY_BASE_DELAY = 0.5  # seconds
-
-
-def _is_transient(exc: Exception) -> bool:
-    """Errors worth retrying: our own RetryableError, and Google rate-limit/server errors."""
-    if isinstance(exc, RetryableError):
-        return True
-    from googleapiclient.errors import HttpError
-    return isinstance(exc, HttpError) and exc.status_code in (429, 500, 502, 503, 504)
 GOOGLE_MAX_SEATS_PER_CALL = 100  # Google Reseller API seat limit per call
 
 
@@ -333,8 +322,8 @@ class ProvisioningService:
     async def _ensure_customer(self, request: ProvisioningRequest):
         """Create or retrieve existing customer (idempotent)."""
         # Check if customer already exists by domain
-        existing = await self._reseller.get_customer_by_domain(
-            request.primary_domain
+        existing = await self._retry_operation(
+            self._reseller.get_customer_by_domain, request.primary_domain
         )
         if existing:
             logger.info(
@@ -403,7 +392,7 @@ class ProvisioningService:
         total_needed = request.license_count
 
         # Check existing subscriptions first (idempotent)
-        existing_subs = await self._reseller.list_subscriptions(customer_id)
+        existing_subs = await self._retry_operation(self._reseller.list_subscriptions, customer_id)
         for sub in existing_subs:
             if sub.sku_id == request.sku_id:
                 current = sub.seats.number_of_seats
@@ -450,7 +439,7 @@ class ProvisioningService:
                     customer_id, exc.subscription_id
                 )
             else:
-                subs = await self._reseller.list_subscriptions(customer_id)
+                subs = await self._retry_operation(self._reseller.list_subscriptions, customer_id)
                 subscription = next((s for s in subs if s.sku_id == request.sku_id), None)
                 if not subscription:
                     raise
@@ -886,23 +875,6 @@ class ProvisioningService:
     # ------------------------------------------------------------------
 
     async def _retry_operation(self, operation, *args, **kwargs):
-        """Retry with exponential backoff + jitter on transient errors, including Google
-        rate limiting (429) and 5xx, which become common when many jobs run in parallel."""
-        last_error = None
-        for attempt in range(MAX_RETRIES):
-            try:
-                return await operation(*args, **kwargs)
-            except Exception as exc:
-                if not _is_transient(exc):
-                    raise
-                last_error = exc
-                delay = RETRY_BASE_DELAY * (2 ** attempt) * random.uniform(0.8, 1.3)
-                logger.warning(
-                    "retrying_operation",
-                    operation=operation.__name__,
-                    attempt=attempt + 1,
-                    max_retries=MAX_RETRIES,
-                    delay=delay,
-                )
-                await asyncio.sleep(delay)
-        raise last_error  # type: ignore[misc]
+        """Retry temporary failures (Google rate limits incl. 403 rateLimitExceeded, 5xx,
+        dropped connections) with backoff. See app.core.google_retry."""
+        return await call_with_retry(operation, *args, **kwargs)

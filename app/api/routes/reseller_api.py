@@ -327,7 +327,7 @@ async def reseller_list_jobs(
     summary="Get provisioning job status",
 )
 @limiter.limit("600/minute")
-async def reseller_get_job_status(
+def reseller_get_job_status(
     job_id: str,
     request: Request,
     reseller: ResellerDocument = Depends(require_reseller_token),
@@ -417,7 +417,7 @@ async def reseller_get_job_status(
     response_model=QuotaResponse,
     summary="View your licence quota and usage",
 )
-async def reseller_get_quota(
+def reseller_get_quota(
     reseller: ResellerDocument = Depends(require_reseller_token),
 ) -> QuotaResponse:
     """Check your current licence usage and remaining quota."""
@@ -446,7 +446,7 @@ async def reseller_get_quota(
     "/companies",
     summary="List companies provisioned by your account",
 )
-async def reseller_list_companies(
+def reseller_list_companies(
     reseller: ResellerDocument = Depends(require_reseller_token),
 ) -> List[dict]:
     """List all companies you have provisioned, with subscription details."""
@@ -495,7 +495,7 @@ async def reseller_list_companies(
     "/companies/{company_id}",
     summary="Get company detail",
 )
-async def reseller_get_company(
+def reseller_get_company(
     company_id: str,
     reseller: ResellerDocument = Depends(require_reseller_token),
 ) -> dict:
