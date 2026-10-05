@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import enum
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, Field
 
@@ -122,6 +122,17 @@ class ProvisioningJobDocument(BaseModel):
     plan: Optional[str] = None
     sku_id: Optional[str] = None
     licensed_seats: Optional[int] = None
+    licences_reserved: int = 0         # quota held for this job while it runs
+    licences_added: int = 0            # licences Google actually added (what the partner is charged)
+    batch_id: Optional[str] = None
+    # Durable execution: everything a worker on any server needs to run or resume the job.
+    request_payload: Optional[Dict[str, Any]] = None
+    lock_token: Optional[str] = None
+    lease_owner: Optional[str] = None
+    heartbeat_at: Optional[float] = None   # epoch seconds, refreshed while a worker runs the job
+    attempts: int = 0
+    settled: bool = True               # False while quota is reserved and not yet settled
+    seats_before: Optional[int] = None  # licences at Google before this job touched them (for resumes)
     users_created: int = 0
     users_failed: int = 0
     users_existing: int = 0

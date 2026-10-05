@@ -8,11 +8,14 @@ account credentials scoped to apps.order.
 from __future__ import annotations
 
 import os
+import threading
 from typing import List, Optional
 
 import structlog
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+
+from app.adapters.google.http_client import authorized_http
 from googleapiclient.errors import HttpError
 
 from app.models.google_api import (
@@ -53,7 +56,7 @@ def _build_service():
     # Impersonate the Workspace admin via Domain-Wide Delegation
     # The raw service account is not authorized as a reseller — the admin is
     delegated = credentials.with_subject(admin_email)
-    return build("reseller", "v1", credentials=delegated, cache_discovery=False)
+    return build("reseller", "v1", http=authorized_http(delegated), cache_discovery=False)
 
 
 def _parse_customer(resp: dict) -> GoogleCustomer:
@@ -84,6 +87,7 @@ def _parse_subscription(resp: dict) -> GoogleSubscription:
         subscriptionId=resp.get("subscriptionId", ""),
         skuId=resp.get("skuId", ""),
         status=resp.get("status", "ACTIVE"),
+        suspensionReasons=resp.get("suspensionReasons", []),
         billingMethod=resp.get("billingMethod", "ONLINE"),
         customerDomain=resp.get("customerDomain", ""),
         skuName=resp.get("skuName", ""),
@@ -107,9 +111,22 @@ class GoogleResellerService(ResellerService):
     """Real Google Workspace Reseller API adapter."""
 
     def __init__(self) -> None:
+        # googleapiclient service objects are not thread-safe: one per worker thread.
+        self._local = threading.local()
         self._service = _build_service()
         admin_email = os.getenv("GOOGLE_ADMIN_EMAIL", "")
         logger.info("google_reseller_initialized", delegated_as=admin_email)
+
+    @property
+    def _service(self):
+        svc = getattr(self._local, "service", None)
+        if svc is None:
+            svc = self._local.service = _build_service()
+        return svc
+
+    @_service.setter
+    def _service(self, value) -> None:
+        self._local.service = value
 
     def _execute_with_retry(self, request_fn, max_retries: int = 3):
         """Execute a Google API request with retry on SSL/connection errors.
@@ -270,9 +287,17 @@ class GoogleResellerService(ResellerService):
         customer_id: str,
         subscription_id: str,
         request: GoogleChangSeatsRequest,
+        plan_name: Optional[str] = None,
     ) -> GoogleSubscription:
-        body = {"numberOfSeats": request.seats.number_of_seats,
-                "maximumNumberOfSeats": request.seats.number_of_seats}
+        seats = request.seats.number_of_seats
+        plan = (plan_name or "").upper()
+        # TRIAL/FLEXIBLE are capped by maximumNumberOfSeats; annual plans by numberOfSeats.
+        if plan in ("TRIAL", "FLEXIBLE"):
+            body = {"maximumNumberOfSeats": seats}
+        elif plan.startswith("ANNUAL"):
+            body = {"numberOfSeats": seats}
+        else:
+            body = {"numberOfSeats": seats, "maximumNumberOfSeats": seats}
         try:
             resp = (
                 self._service.subscriptions()
@@ -282,6 +307,65 @@ class GoogleResellerService(ResellerService):
             return _parse_subscription(resp)
         except HttpError as e:
             logger.error("google_reseller_change_seats_error", customer_id=customer_id, error=str(e))
+            raise
+
+    async def suspend_subscription(self, customer_id: str, subscription_id: str) -> GoogleSubscription:
+        try:
+            resp = self._execute_with_retry(
+                lambda svc: svc.subscriptions()
+                .suspend(customerId=customer_id, subscriptionId=subscription_id)
+                .execute()
+            )
+            logger.info("google_reseller_subscription_suspended", customer_id=customer_id, subscription_id=subscription_id)
+            return _parse_subscription(resp)
+        except HttpError as e:
+            logger.error("google_reseller_suspend_error", customer_id=customer_id, status=e.status_code, error=str(e))
+            raise
+
+    async def activate_subscription(self, customer_id: str, subscription_id: str) -> GoogleSubscription:
+        try:
+            resp = self._execute_with_retry(
+                lambda svc: svc.subscriptions()
+                .activate(customerId=customer_id, subscriptionId=subscription_id)
+                .execute()
+            )
+            logger.info("google_reseller_subscription_activated", customer_id=customer_id, subscription_id=subscription_id)
+            return _parse_subscription(resp)
+        except HttpError as e:
+            logger.error("google_reseller_activate_error", customer_id=customer_id, status=e.status_code, error=str(e))
+            raise
+
+    async def transfer_to_google(self, customer_id: str, subscription_ids: List[str]) -> None:
+        # deletionType="cancel" is no longer supported for Google Workspace subscriptions.
+        def request(svc, sid):
+            return svc.subscriptions().delete(
+                customerId=customer_id, subscriptionId=sid, deletionType="transfer_to_direct"
+            )
+
+        try:
+            if len(subscription_ids) == 1:
+                self._execute_with_retry(lambda svc: request(svc, subscription_ids[0]).execute())
+            else:
+                # Google requires a customer's subscriptions to be transferred together in one batch.
+                errors: List[Exception] = []
+
+                def collect(_request_id, _response, exception):
+                    if exception is not None:
+                        errors.append(exception)
+
+                def run_batch(svc):
+                    batch = svc.new_batch_http_request(callback=collect)
+                    for sid in subscription_ids:
+                        batch.add(request(svc, sid))
+                    batch.execute()
+
+                self._execute_with_retry(run_batch)
+                if errors:
+                    raise errors[0]
+            logger.info("google_reseller_transferred_to_google", customer_id=customer_id,
+                        subscription_ids=subscription_ids)
+        except HttpError as e:
+            logger.error("google_reseller_transfer_error", customer_id=customer_id, status=e.status_code, error=str(e))
             raise
 
     async def change_plan(

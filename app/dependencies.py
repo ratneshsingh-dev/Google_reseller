@@ -16,6 +16,7 @@ from app.adapters.mock.mock_reseller import MockResellerService
 from app.core.config import get_settings
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.company_repository import CompanyRepository
+from app.repositories.coordination_repository import IdempotencyRepository, LockRepository
 from app.repositories.employee_repository import EmployeeRepository
 from app.repositories.firestore_client import get_store
 from app.repositories.admin_repository import AdminRepository
@@ -24,7 +25,9 @@ from app.repositories.notification_repository import NotificationRepository
 from app.repositories.reseller_repository import ResellerRepository
 from app.repositories.subscription_repository import SubscriptionRepository
 from app.services.directory_service import DirectoryService
+from app.services.domain_service import DomainService
 from app.services.email_service import EmailService
+from app.services.provisioning_intake import ProvisioningIntake
 from app.services.provisioning_service import ProvisioningService
 from app.services.reseller_service import ResellerService
 
@@ -142,6 +145,40 @@ def get_provisioning_service() -> ProvisioningService:
     )
 
 
+@lru_cache()
+def get_lock_repo() -> LockRepository:
+    return LockRepository(get_store())
+
+
+@lru_cache()
+def get_idempotency_repo() -> IdempotencyRepository:
+    return IdempotencyRepository(get_store())
+
+
+def get_domain_service() -> DomainService:
+    return DomainService(
+        reseller_service=get_reseller_service(),
+        company_repo=get_company_repo(),
+        subscription_repo=get_subscription_repo(),
+        reseller_repo=get_reseller_repo(),
+        audit_repo=get_audit_repo(),
+        lock_repo=get_lock_repo(),
+    )
+
+
+def get_provisioning_intake() -> ProvisioningIntake:
+    return ProvisioningIntake(
+        store=get_store(),
+        job_repo=get_job_repo(),
+        reseller_repo=get_reseller_repo(),
+        lock_repo=get_lock_repo(),
+        idempotency_repo=get_idempotency_repo(),
+        audit_repo=get_audit_repo(),
+        provisioning_service_factory=get_provisioning_service,
+        max_items=get_settings().bulk_max_items,
+    )
+
+
 def reset_dependencies() -> None:
     """Reset all singletons — for testing only."""
     global _reseller_service, _directory_service, _email_service
@@ -155,3 +192,5 @@ def reset_dependencies() -> None:
     get_notification_repo.cache_clear()
     get_reseller_repo.cache_clear()
     get_audit_repo.cache_clear()
+    get_lock_repo.cache_clear()
+    get_idempotency_repo.cache_clear()

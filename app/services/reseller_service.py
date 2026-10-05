@@ -57,9 +57,32 @@ class ResellerService(ABC):
 
     @abstractmethod
     async def change_seats(
-        self, customer_id: str, subscription_id: str, request: GoogleChangSeatsRequest
+        self,
+        customer_id: str,
+        subscription_id: str,
+        request: GoogleChangSeatsRequest,
+        plan_name: Optional[str] = None,
     ) -> GoogleSubscription:
         """Change seat count on a subscription."""
+        ...
+
+    @abstractmethod
+    async def suspend_subscription(self, customer_id: str, subscription_id: str) -> GoogleSubscription:
+        """Suspend a subscription (service stops, subscription is kept)."""
+        ...
+
+    @abstractmethod
+    async def activate_subscription(self, customer_id: str, subscription_id: str) -> GoogleSubscription:
+        """Reactivate a suspended subscription."""
+        ...
+
+    @abstractmethod
+    async def transfer_to_google(self, customer_id: str, subscription_ids: List[str]) -> None:
+        """Hand the subscriptions over to Google (deletionType=transfer_to_direct).
+
+        The customer moves to direct billing with Google and the reseller stops being billed.
+        Google requires all of a customer's subscriptions to be transferred in one batch.
+        """
         ...
 
     @abstractmethod

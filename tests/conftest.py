@@ -23,6 +23,12 @@ os.environ["MOCK_FAILURE_MODE"] = "false"
 os.environ["MOCK_FAILURE_RATE"] = "0.0"
 os.environ["LOG_LEVEL"] = "WARNING"
 
+# app/main.py calls load_dotenv(override=True); a developer .env can point at real
+# Google and a real Firestore database, which would silently replace the values above.
+import dotenv  # noqa: E402
+
+dotenv.load_dotenv = lambda *args, **kwargs: False
+
 
 @pytest.fixture(autouse=True)
 def reset_state():
@@ -32,9 +38,18 @@ def reset_state():
     from app.core.config import get_settings
 
     # Clear caches
+    from app.core import job_executor
+    from app.core.rate_limit import limiter
+
+    job_executor.wait_until_idle(timeout=30)
+    job_executor.reset()
     get_settings.cache_clear()
     reset_store()
     reset_dependencies()
+    limiter.reset()
+    settings = get_settings()
+    if settings.use_firestore or settings.service_adapter != "mock":
+        pytest.exit("Refusing to run tests against real Google or Firestore.", returncode=2)
     yield
     get_settings.cache_clear()
     reset_store()
@@ -69,6 +84,8 @@ def sample_request() -> dict:
         "license_count": 3,
         "initiated_by_email": "developer@test-alt.com",
         "econz_notification_email": "econz@example.net",
+        "admin_first_name": "Ada",
+        "admin_last_name": "Admin",
         "employees": [
             {
                 "first_name": "Rahul",
@@ -109,6 +126,8 @@ def sample_request_small() -> dict:
         "license_count": 1,
         "initiated_by_email": "jane@small-alt.com",
         "econz_notification_email": "econz@example.net",
+        "admin_first_name": "Ada",
+        "admin_last_name": "Admin",
         "employees": [
             {
                 "first_name": "Jane",

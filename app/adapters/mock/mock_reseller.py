@@ -208,8 +208,38 @@ class MockResellerService(ResellerService):
         )
         return subscription
 
+    async def suspend_subscription(self, customer_id: str, subscription_id: str) -> GoogleSubscription:
+        reasons = self._subscriptions[customer_id][subscription_id].suspension_reasons
+        return self._set_status(customer_id, subscription_id, sorted(set(reasons) | {"RESELLER_INITIATED"}))
+
+    async def activate_subscription(self, customer_id: str, subscription_id: str) -> GoogleSubscription:
+        reasons = self._subscriptions[customer_id][subscription_id].suspension_reasons
+        if "RESELLER_INITIATED" not in reasons:
+            raise ValueError("Operation disallowed because subscription was not suspended by reseller")
+        return self._set_status(customer_id, subscription_id, [r for r in reasons if r != "RESELLER_INITIATED"])
+
+    async def transfer_to_google(self, customer_id: str, subscription_ids: List[str]) -> None:
+        self._maybe_fail()
+        for subscription_id in subscription_ids:
+            self._subscriptions.get(customer_id, {}).pop(subscription_id, None)
+
+    def _set_status(self, customer_id: str, subscription_id: str, reasons: List[str]) -> GoogleSubscription:
+        """Mirror Google: a subscription is SUSPENDED while it has any suspension reason."""
+        self._maybe_fail()
+        sub = self._subscriptions[customer_id][subscription_id]
+        updated = sub.model_copy(update={
+            "suspension_reasons": reasons,
+            "status": "SUSPENDED" if reasons else "ACTIVE",
+        })
+        self._subscriptions[customer_id][subscription_id] = updated
+        return updated
+
     async def change_seats(
-        self, customer_id: str, subscription_id: str, request: GoogleChangSeatsRequest
+        self,
+        customer_id: str,
+        subscription_id: str,
+        request: GoogleChangSeatsRequest,
+        plan_name: Optional[str] = None,
     ) -> GoogleSubscription:
         self._maybe_fail()
         await asyncio.sleep(0.01)

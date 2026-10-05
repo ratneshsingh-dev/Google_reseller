@@ -8,7 +8,7 @@ the provisioning orchestrator.
 from __future__ import annotations
 
 import re
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -40,6 +40,13 @@ class EmployeeRequest(BaseModel):
         if v is not None and v != "" and not validate_email(v):
             raise ValueError(f"Invalid personal email format: {v}")
         return v
+
+
+class BulkProvisioningRequest(BaseModel):
+    """Several provisioning requests in one call. Each item has the same fields as POST /provision
+    and is validated on its own, so one bad item does not reject the others."""
+
+    requests: List[Dict[str, Any]] = Field(..., min_length=1, description="Up to 100 provisioning requests")
 
 
 class ProvisioningRequest(BaseModel):

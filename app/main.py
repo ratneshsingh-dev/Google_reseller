@@ -6,7 +6,9 @@ Entrypoint: uvicorn app.main:app --reload
 
 from __future__ import annotations
 
+import asyncio
 import os
+from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 load_dotenv(override=True)
 from contextlib import asynccontextmanager
@@ -18,8 +20,9 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.routes import auth, companies, mock_directory, mock_reseller, provisioning
 from app.api.routes import admin as admin_routes
-from app.api.routes import reseller_api, reseller_auth
+from app.api.routes import internal_tasks, reseller_api, reseller_auth
 from app.core.config import get_settings
+from app.core.reconciler import start_reconciler
 from app.core.exceptions import (
     InsufficientSeatsError,
     InvalidDomainError,
@@ -49,8 +52,14 @@ async def lifespan(app: FastAPI):
         version=settings.app_version,
         adapter=settings.service_adapter,
         firestore=settings.use_firestore,
+        job_backend=settings.job_backend,
     )
+    # asyncio's default pool is min(32, CPUs + 4) threads: only 5 on a 1-vCPU Cloud Run
+    # instance, which would silently cap how many requests can wait on Firestore/Google at once.
+    asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=64, thread_name_prefix="io"))
+    stop_reconciler = start_reconciler()
     yield
+    stop_reconciler.set()
     logger.info("app_shutdown")
 
 
@@ -151,6 +160,7 @@ def create_app() -> FastAPI:
     application.include_router(admin_routes.router)
     application.include_router(reseller_auth.router)
     application.include_router(reseller_api.router)
+    application.include_router(internal_tasks.router)
     application.include_router(provisioning.router)
     application.include_router(companies.router)
     application.include_router(mock_reseller.router)

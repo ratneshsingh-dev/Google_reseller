@@ -98,6 +98,24 @@ def create_access_token(
     return token
 
 
+ADMIN_VIEW_TOKEN_MAX_AGE_SECONDS = 3600
+
+
+def create_admin_view_token(reseller_id: str, admin_email: str, token_version: int) -> str:
+    """Short-lived, read-only token letting an admin open a partner's dashboard."""
+    settings = get_settings()
+    now = datetime.now(timezone.utc)
+    payload: Dict[str, Any] = {
+        "sub": reseller_id,
+        "type": "admin_view",
+        "viewer": admin_email,
+        "token_version": token_version,
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(seconds=ADMIN_VIEW_TOKEN_MAX_AGE_SECONDS)).timestamp()),
+    }
+    return jwt.encode(payload, settings.jwt_secret_key, algorithm="HS256")
+
+
 def decode_token(token: str) -> Dict[str, Any]:
     """Decode and verify a JWT token.
 

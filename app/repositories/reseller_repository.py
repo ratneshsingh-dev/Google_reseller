@@ -4,11 +4,38 @@ Repository for the 'resellers' Firestore collection.
 
 from __future__ import annotations
 
+import random
+import time
 from datetime import datetime, timezone
 from typing import List, Optional
 
 from app.models.reseller_models import ResellerDocument
 from app.repositories.firestore_client import BaseStore
+
+_CAS_ATTEMPTS = 30
+
+
+class QuotaExceededError(Exception):
+    """Reserving these licences would take the partner over their cap."""
+
+    def __init__(self, requested: int, used: int, cap: int) -> None:
+        self.requested = requested
+        self.used = used
+        self.cap = cap
+        self.remaining = max(0, cap - used)
+        super().__init__(f"Cannot assign {requested} licence(s). You have {self.remaining} remaining out of {cap}.")
+
+    def as_detail(self) -> dict:
+        return {
+            "error": "Licence cap exceeded",
+            "detail": str(self),
+            "quota": {
+                "requested": self.requested,
+                "licences_used": self.used,
+                "max_licence_cap": self.cap,
+                "licences_remaining": self.remaining,
+            },
+        }
 
 
 class ResellerRepository:
@@ -60,11 +87,29 @@ class ResellerRepository:
         self._store.update(self.COLLECTION, reseller_id, data)
 
     def increment_licences_used(self, reseller_id: str, count: int) -> None:
-        """Atomically (best-effort) increment the licences_used counter."""
-        reseller = self.get_by_id(reseller_id)
-        if reseller:
-            new_count = reseller.licences_used + count
-            self.update(reseller_id, {"licences_used": new_count})
+        """Adjust licences_used by count (negative releases). Atomic, no cap check."""
+        self.adjust_licences_used(reseller_id, count, enforce_cap=False)
+
+    def adjust_licences_used(self, reseller_id: str, delta: int, enforce_cap: bool) -> ResellerDocument:
+        """Atomically change licences_used using compare-and-swap, retrying on conflict.
+
+        With enforce_cap=True the change is refused (QuotaExceededError) if it would exceed
+        max_licence_cap, so parallel requests can never push a partner over their cap.
+        """
+        for attempt in range(_CAS_ATTEMPTS):
+            data, version = self._store.get_versioned(self.COLLECTION, reseller_id)
+            if data is None:
+                raise KeyError(f"Reseller {reseller_id} not found")
+            reseller = ResellerDocument(**data)
+            new_used = max(0, reseller.licences_used + delta)
+            if enforce_cap and delta > 0 and new_used > reseller.max_licence_cap:
+                raise QuotaExceededError(delta, reseller.licences_used, reseller.max_licence_cap)
+            data["licences_used"] = new_used
+            data["updated_at"] = datetime.now(timezone.utc).isoformat()
+            if self._store.set_if_version(self.COLLECTION, reseller_id, data, version):
+                return ResellerDocument(**data)
+            time.sleep(random.uniform(0.005, 0.05) * (attempt + 1))
+        raise RuntimeError(f"Could not update licence quota for {reseller_id}: too much contention")
 
     def increment_token_version(self, reseller_id: str) -> int:
         """Increment token_version to revoke all active JWTs for this reseller.

@@ -35,6 +35,21 @@ class Settings(BaseSettings):
     # --- Service adapter ---
     service_adapter: str = "mock"  # "mock" | "google"
 
+    # --- Background jobs ---
+    job_concurrency: int = 25          # provisioning jobs running at the same time per server
+    bulk_max_items: int = 100          # domains accepted in one bulk request
+    job_backend: str = "memory"        # "memory" (in-process pool) | "cloudtasks" (durable queue)
+    job_stale_after_seconds: int = 1800  # no heartbeat for this long -> job is treated as dead
+    job_heartbeat_seconds: int = 20
+    reconcile_interval_seconds: int = 300
+    google_call_timeout_seconds: int = 60
+
+    # --- Cloud Tasks (used when job_backend == "cloudtasks") ---
+    cloud_tasks_location: str = "us-central1"
+    cloud_tasks_queue: str = ""
+    tasks_invoker_sa: str = ""         # service account Cloud Tasks signs its OIDC token as
+    worker_base_url: str = ""          # public URL of this service, e.g. https://....run.app
+
     # --- Mock failure simulation ---
     mock_failure_mode: bool = False
     mock_failure_rate: float = 0.0  # 0.0 to 1.0

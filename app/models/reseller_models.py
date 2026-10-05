@@ -116,6 +116,11 @@ class EmailLoginRequest(BaseModel):
     client_secret: str
 
 
+class ChangeLicencesRequest(BaseModel):
+    """Set the total number of licences on a provisioned domain."""
+    license_count: int = Field(..., ge=1, description="New TOTAL licence count for the domain")
+
+
 class UpdateResellerRequest(BaseModel):
     """Admin updates a reseller's cap, role, or status."""
     max_licence_cap: Optional[int] = Field(None, ge=1)
