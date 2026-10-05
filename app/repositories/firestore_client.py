@@ -16,6 +16,8 @@ import google.auth
 import google.auth.transport.requests
 from google.oauth2 import service_account
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -276,11 +278,25 @@ class FirestoreStore(BaseStore):
                 self._credentials, _ = google.auth.default(scopes=scopes)
         self._auth_req = google.auth.transport.requests.Request()
         self._lock = threading.Lock()
+        self._local = threading.local()
         logger.info(
             "firestore_initialized",
             project=self._project,
             database=self._database,
         )
+
+    def _http(self) -> requests.Session:
+        """One pooled session per thread: reuses TLS connections instead of opening one per
+        call, and retries connection-level failures (dropped/broken connections, resets)."""
+        session = getattr(self._local, "session", None)
+        if session is None:
+            retry = Retry(total=3, connect=3, read=2, status=0, backoff_factor=0.3,
+                          allowed_methods=None, raise_on_status=False)
+            adapter = HTTPAdapter(pool_connections=4, pool_maxsize=8, max_retries=retry)
+            session = requests.Session()
+            session.mount("https://", adapter)
+            self._local.session = session
+        return session
 
     def _get_headers(self) -> dict:
         with self._lock:
@@ -293,7 +309,7 @@ class FirestoreStore(BaseStore):
 
     def get(self, collection: str, doc_id: str) -> Optional[Dict[str, Any]]:
         url = f"{self._base_url}/{collection}/{doc_id}"
-        resp = requests.get(url, headers=self._get_headers(), timeout=_HTTP_TIMEOUT)
+        resp = self._http().get(url, headers=self._get_headers(), timeout=_HTTP_TIMEOUT)
         if resp.status_code == 200:
             return _firestore_doc_to_dict(resp.json())
         if resp.status_code == 404:
@@ -308,7 +324,7 @@ class FirestoreStore(BaseStore):
     def set(self, collection: str, doc_id: str, data: Dict[str, Any]) -> None:
         url = f"{self._base_url}/{collection}/{doc_id}"
         body = _dict_to_firestore_doc(data)
-        resp = requests.patch(url, headers=self._get_headers(), timeout=_HTTP_TIMEOUT, json=body)
+        resp = self._http().patch(url, headers=self._get_headers(), timeout=_HTTP_TIMEOUT, json=body)
         if resp.status_code not in (200, 201):
             logger.error("firestore_set_error", status=resp.status_code, text=resp.text)
             resp.raise_for_status()
@@ -318,20 +334,20 @@ class FirestoreStore(BaseStore):
         # read-merge-write. A full rewrite here would let concurrent writers erase each other.
         url = f"{self._base_url}/{collection}/{doc_id}"
         params = [("updateMask.fieldPaths", field) for field in data]
-        resp = requests.patch(url, headers=self._get_headers(), timeout=_HTTP_TIMEOUT, params=params, json=_dict_to_firestore_doc(data))
+        resp = self._http().patch(url, headers=self._get_headers(), timeout=_HTTP_TIMEOUT, params=params, json=_dict_to_firestore_doc(data))
         if resp.status_code not in (200, 201):
             logger.error("firestore_update_error", collection=collection, doc_id=doc_id,
                          status=resp.status_code, text=resp.text)
 
     def delete(self, collection: str, doc_id: str) -> None:
         url = f"{self._base_url}/{collection}/{doc_id}"
-        resp = requests.delete(url, headers=self._get_headers(), timeout=_HTTP_TIMEOUT)
+        resp = self._http().delete(url, headers=self._get_headers(), timeout=_HTTP_TIMEOUT)
         if resp.status_code not in (200, 204, 404):
             logger.error("firestore_delete_error", status=resp.status_code, text=resp.text)
 
     def get_versioned(self, collection: str, doc_id: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         url = f"{self._base_url}/{collection}/{doc_id}"
-        resp = requests.get(url, headers=self._get_headers(), timeout=_HTTP_TIMEOUT)
+        resp = self._http().get(url, headers=self._get_headers(), timeout=_HTTP_TIMEOUT)
         if resp.status_code == 404:
             return None, None
         resp.raise_for_status()
@@ -348,7 +364,7 @@ class FirestoreStore(BaseStore):
     def set_if_version(self, collection: str, doc_id: str, data: Dict[str, Any], version: Optional[str]) -> bool:
         url = f"{self._base_url}/{collection}/{doc_id}"
         params = {"currentDocument.exists": "false"} if version is None else {"currentDocument.updateTime": version}
-        resp = requests.patch(url, headers=self._get_headers(), timeout=_HTTP_TIMEOUT, params=params, json=_dict_to_firestore_doc(data))
+        resp = self._http().patch(url, headers=self._get_headers(), timeout=_HTTP_TIMEOUT, params=params, json=_dict_to_firestore_doc(data))
         if resp.status_code in (200, 201):
             return True
         if self._precondition_failed(resp):
@@ -359,7 +375,7 @@ class FirestoreStore(BaseStore):
 
     def delete_if_version(self, collection: str, doc_id: str, version: str) -> bool:
         url = f"{self._base_url}/{collection}/{doc_id}"
-        resp = requests.delete(url, headers=self._get_headers(), timeout=_HTTP_TIMEOUT, params={"currentDocument.updateTime": version})
+        resp = self._http().delete(url, headers=self._get_headers(), timeout=_HTTP_TIMEOUT, params={"currentDocument.updateTime": version})
         if resp.status_code in (200, 204):
             return True
         if self._precondition_failed(resp):
@@ -397,7 +413,7 @@ class FirestoreStore(BaseStore):
                 },
             }
         }
-        resp = requests.post(url, headers=self._get_headers(), timeout=_HTTP_TIMEOUT, json=structured_query)
+        resp = self._http().post(url, headers=self._get_headers(), timeout=_HTTP_TIMEOUT, json=structured_query)
         if resp.status_code != 200:
             logger.error("firestore_query_error", status=resp.status_code, text=resp.text)
             return []
@@ -411,7 +427,7 @@ class FirestoreStore(BaseStore):
 
     def list_all(self, collection: str) -> List[Dict[str, Any]]:
         url = f"{self._base_url}/{collection}"
-        resp = requests.get(url, headers=self._get_headers(), timeout=_HTTP_TIMEOUT)
+        resp = self._http().get(url, headers=self._get_headers(), timeout=_HTTP_TIMEOUT)
         if resp.status_code == 200:
             docs = resp.json().get("documents", [])
             return [_firestore_doc_to_dict(d) for d in docs]

@@ -53,7 +53,7 @@ router = APIRouter(prefix="/api/v1/reseller/auth", tags=["Reseller Auth"])
     ),
 )
 @limiter.limit("5/minute")
-async def get_token(request: Request, body: TokenRequest) -> TokenResponse:
+def get_token(request: Request, body: TokenRequest) -> TokenResponse:
     """Exchange client credentials for a JWT access token.
 
     - **client_id**: Your reseller ID (e.g., RSL-A1B2C3D4)
@@ -139,7 +139,7 @@ async def get_token(request: Request, body: TokenRequest) -> TokenResponse:
     ),
 )
 @limiter.limit("5/minute")
-async def email_login(request: Request, body: EmailLoginRequest) -> TokenResponse:
+def email_login(request: Request, body: EmailLoginRequest) -> TokenResponse:
     """Login to the Channel Partner Portal using contact email + client_secret."""
     reseller_repo = ResellerRepository(get_store())
     ip = request.client.host if request.client else ""
@@ -209,7 +209,7 @@ class GooglePartnerLoginRequest(_BaseModel):
     ),
 )
 @limiter.limit("10/minute")
-async def google_login(request: Request, body: GooglePartnerLoginRequest) -> TokenResponse:
+def google_login(request: Request, body: GooglePartnerLoginRequest) -> TokenResponse:
     """Login to the Channel Partner Portal using Google OAuth."""
     ip = request.client.host if request.client else ""
 

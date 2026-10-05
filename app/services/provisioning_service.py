@@ -18,18 +18,19 @@ will skip already-completed steps and only retry failed operations.
 from __future__ import annotations
 
 import asyncio
-import random
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
+
+from app.core.google_retry import call_with_retry
 
 from app.core.exceptions import (
     CustomerAlreadyExistsError,
     DuplicateEmployeeError,
     InsufficientSeatsError,
-    RetryableError,
     SeatReductionNotAllowedError,
     SubscriptionAlreadyExistsError,
+    UserNotFoundError,
 )
 from app.core.logging import get_logger
 from app.core.security import (
@@ -71,17 +72,15 @@ from app.services.reseller_service import ResellerService
 
 logger = get_logger(__name__)
 
-MAX_RETRIES = 5
-RETRY_BASE_DELAY = 0.5  # seconds
+GOOGLE_MAX_SEATS_PER_CALL = 100  # Google Reseller API seat limit per call
+MAKE_ADMIN_NOT_FOUND_WAITS = (2, 4, 8, 16)  # seconds; the last entry is never slept
 
 
-def _is_transient(exc: Exception) -> bool:
-    """Errors worth retrying: our own RetryableError, and Google rate-limit/server errors."""
-    if isinstance(exc, RetryableError):
+def _is_not_found(exc: Exception) -> bool:
+    if isinstance(exc, UserNotFoundError):
         return True
     from googleapiclient.errors import HttpError
-    return isinstance(exc, HttpError) and exc.status_code in (429, 500, 502, 503, 504)
-GOOGLE_MAX_SEATS_PER_CALL = 100  # Google Reseller API seat limit per call
+    return isinstance(exc, HttpError) and exc.status_code == 404
 
 
 class ProvisioningService:
@@ -333,8 +332,8 @@ class ProvisioningService:
     async def _ensure_customer(self, request: ProvisioningRequest):
         """Create or retrieve existing customer (idempotent)."""
         # Check if customer already exists by domain
-        existing = await self._reseller.get_customer_by_domain(
-            request.primary_domain
+        existing = await self._retry_operation(
+            self._reseller.get_customer_by_domain, request.primary_domain
         )
         if existing:
             logger.info(
@@ -403,7 +402,7 @@ class ProvisioningService:
         total_needed = request.license_count
 
         # Check existing subscriptions first (idempotent)
-        existing_subs = await self._reseller.list_subscriptions(customer_id)
+        existing_subs = await self._retry_operation(self._reseller.list_subscriptions, customer_id)
         for sub in existing_subs:
             if sub.sku_id == request.sku_id:
                 current = sub.seats.number_of_seats
@@ -450,7 +449,7 @@ class ProvisioningService:
                     customer_id, exc.subscription_id
                 )
             else:
-                subs = await self._reseller.list_subscriptions(customer_id)
+                subs = await self._retry_operation(self._reseller.list_subscriptions, customer_id)
                 subscription = next((s for s in subs if s.sku_id == request.sku_id), None)
                 if not subscription:
                     raise
@@ -667,10 +666,7 @@ class ProvisioningService:
             existing_emails.add(corporate_email)
 
             if is_admin:
-                await self._retry_operation(
-                    self._directory.make_admin,
-                    corporate_email
-                )
+                await self._make_admin(corporate_email)
 
             logger.info(
                 "employee_provisioned",
@@ -885,24 +881,22 @@ class ProvisioningService:
     # Retry logic
     # ------------------------------------------------------------------
 
-    async def _retry_operation(self, operation, *args, **kwargs):
-        """Retry with exponential backoff + jitter on transient errors, including Google
-        rate limiting (429) and 5xx, which become common when many jobs run in parallel."""
-        last_error = None
-        for attempt in range(MAX_RETRIES):
+    async def _make_admin(self, email: str) -> None:
+        """Grant super-admin to a user created moments ago. Google can briefly answer
+        "Resource Not Found: userKey" until the new user is visible to makeAdmin
+        (eventual consistency), so a not-found here is retried after a short wait."""
+        for attempt, wait in enumerate(MAKE_ADMIN_NOT_FOUND_WAITS):
             try:
-                return await operation(*args, **kwargs)
+                await self._retry_operation(self._directory.make_admin, email)
+                return
             except Exception as exc:
-                if not _is_transient(exc):
+                if not _is_not_found(exc) or attempt == len(MAKE_ADMIN_NOT_FOUND_WAITS) - 1:
                     raise
-                last_error = exc
-                delay = RETRY_BASE_DELAY * (2 ** attempt) * random.uniform(0.8, 1.3)
-                logger.warning(
-                    "retrying_operation",
-                    operation=operation.__name__,
-                    attempt=attempt + 1,
-                    max_retries=MAX_RETRIES,
-                    delay=delay,
-                )
-                await asyncio.sleep(delay)
-        raise last_error  # type: ignore[misc]
+                logger.warning("make_admin_user_not_visible_yet", email=email,
+                               attempt=attempt + 1, retry_in_seconds=wait)
+                await asyncio.sleep(wait)
+
+    async def _retry_operation(self, operation, *args, **kwargs):
+        """Retry temporary failures (Google rate limits incl. 403 rateLimitExceeded, 5xx,
+        dropped connections) with backoff. See app.core.google_retry."""
+        return await call_with_retry(operation, *args, **kwargs)

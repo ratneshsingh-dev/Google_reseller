@@ -77,17 +77,44 @@ def enqueue_cloud_task(job_id: str) -> None:
     logger.info("cloud_task_enqueued", job_id=job_id, queue=settings.cloud_tasks_queue)
 
 
+_GOOGLE_CERTS_URL = "https://www.googleapis.com/oauth2/v1/certs"
+_GOOGLE_ISSUERS = {"accounts.google.com", "https://accounts.google.com"}
+_CERTS_TTL_SECONDS = 3600
+_certs_cache: dict = {"certs": None, "fetched_at": 0.0}
+_certs_lock = threading.Lock()
+
+
+def _google_certs() -> dict:
+    """Google's OIDC signing certificates, cached so each task isn't a network round-trip."""
+    import time
+
+    with _certs_lock:
+        if _certs_cache["certs"] is None or time.time() - _certs_cache["fetched_at"] > _CERTS_TTL_SECONDS:
+            resp = requests.get(_GOOGLE_CERTS_URL, timeout=10)
+            resp.raise_for_status()
+            _certs_cache.update(certs=resp.json(), fetched_at=time.time())
+        return _certs_cache["certs"]
+
+
 def verify_task_request(authorization: Optional[str]) -> None:
     """Accept only calls carrying a Google-signed OIDC token for our invoker service account."""
-    from google.auth.transport import requests as google_requests
-    from google.oauth2 import id_token
+    from google.auth import jwt
 
     settings = get_settings()
     if not authorization or not authorization.lower().startswith("bearer "):
         raise PermissionError("Missing task token")
-    claims = id_token.verify_oauth2_token(
-        authorization[7:].strip(), google_requests.Request(), audience=settings.worker_base_url.rstrip("/")
-    )
+    token = authorization[7:].strip()
+    if token.count(".") != 2:
+        raise PermissionError("Malformed task token")
+    audience = settings.worker_base_url.rstrip("/")
+    try:
+        claims = jwt.decode(token, certs=_google_certs(), audience=audience)
+    except ValueError:
+        # Google may have rotated its keys since we cached them: refresh once and retry.
+        _certs_cache["certs"] = None
+        claims = jwt.decode(token, certs=_google_certs(), audience=audience)
+    if claims.get("iss") not in _GOOGLE_ISSUERS:
+        raise PermissionError("Task token was not issued by Google")
     if claims.get("email") != settings.tasks_invoker_sa or not claims.get("email_verified"):
         raise PermissionError("Task token is not from the expected service account")
 

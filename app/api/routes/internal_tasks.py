@@ -30,9 +30,9 @@ class ProvisionTask(BaseModel):
     job_id: str
 
 
-def _authorise(authorization: Optional[str]) -> None:
+async def _authorise(authorization: Optional[str]) -> None:
     try:
-        job_dispatcher.verify_task_request(authorization)
+        await asyncio.to_thread(job_dispatcher.verify_task_request, authorization)
     except Exception as exc:
         logger.warning("task_request_rejected", reason=str(exc)[:120])
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -45,7 +45,7 @@ async def run_provision_job(
     request: Request,
     authorization: Optional[str] = Header(None),
 ) -> dict:
-    _authorise(authorization)
+    await _authorise(authorization)
     intake = get_provisioning_intake()
     attempt = request.headers.get("X-CloudTasks-TaskRetryCount", "0")
     logger.info("task_received", job_id=task.job_id, retry=attempt)
@@ -61,7 +61,7 @@ async def run_provision_job(
 @limiter.exempt
 async def reconcile(authorization: Optional[str] = Header(None)) -> dict:
     """Fail and settle jobs that stopped sending heartbeats (for Cloud Scheduler)."""
-    _authorise(authorization)
+    await _authorise(authorization)
     intake = get_provisioning_intake()
     failed = await asyncio.to_thread(intake.reconcile_stale_jobs)
     return {"interrupted_jobs": failed}

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+
+import anyio
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 load_dotenv(override=True)
@@ -57,6 +59,8 @@ async def lifespan(app: FastAPI):
     # asyncio's default pool is min(32, CPUs + 4) threads: only 5 on a 1-vCPU Cloud Run
     # instance, which would silently cap how many requests can wait on Firestore/Google at once.
     asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=64, thread_name_prefix="io"))
+    # Sync route handlers and dependencies run on AnyIO's thread pool (40 threads by default).
+    anyio.to_thread.current_default_thread_limiter().total_tokens = 100
     stop_reconciler = start_reconciler()
     yield
     stop_reconciler.set()
