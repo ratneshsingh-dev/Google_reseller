@@ -160,3 +160,22 @@ class TestListAllPagination:
         _, _, Resp = self._store([])
         store, _, _ = self._store([Resp(403, {})])
         assert store.list_all("c") == []
+
+
+class TestDashboardFilesAreNotStale:
+    """After a release browsers must pick up the new dashboard script/CSS (they used to keep
+    old copies and showed a new page driven by old code)."""
+
+    @pytest.mark.parametrize("path", [
+        "/static/reseller-admin.html", "/static/js/reseller-admin.js", "/static/css/reseller-admin.css",
+    ])
+    def test_static_files_must_be_revalidated(self, client, path):
+        r = client.get(path)
+        assert r.status_code == 200
+        assert r.headers["cache-control"] == "no-cache"
+        assert r.headers.get("etag")
+
+    def test_unchanged_file_costs_only_a_304(self, client):
+        first = client.get("/static/js/reseller-admin.js")
+        again = client.get("/static/js/reseller-admin.js", headers={"If-None-Match": first.headers["etag"]})
+        assert again.status_code == 304

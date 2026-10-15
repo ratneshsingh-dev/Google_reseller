@@ -43,6 +43,17 @@ from slowapi.middleware import SlowAPIMiddleware
 logger = get_logger(__name__)
 
 
+class NoCacheStaticFiles(StaticFiles):
+    """Serve the dashboards' HTML/JS/CSS with "no-cache": browsers still keep a copy but must
+    check it against the ETag on every load (a cheap 304 when unchanged). Without this they
+    reuse an old script for hours and show a new page with old code after each release."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application startup/shutdown events."""
@@ -174,7 +185,7 @@ def create_app() -> FastAPI:
     static_dir = os.path.join(os.path.dirname(__file__), "static")
     if os.path.exists(static_dir):
         application.mount(
-            "/static", StaticFiles(directory=static_dir), name="static"
+            "/static", NoCacheStaticFiles(directory=static_dir), name="static"
         )
 
     @application.get("/", include_in_schema=False)
