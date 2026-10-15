@@ -247,6 +247,20 @@ function renderPlanMix(resellerId) {
 // Render Reseller List
 // ---------------------------------------------------------------------------
 
+// Flexible / Annual / Trial counts for one partner, shown on its card in the list.
+function planChips(resellerId) {
+  const p = ((planSummary && planSummary.plan_breakdown_by_reseller) || {})[resellerId];
+  if (!p || !p.total) return '<div class="plan-chips"><span class="plan-chip plan-chip-none">No domains yet</span></div>';
+  const annual = (p.annual_monthly_pay ?? 0) + (p.annual_yearly_pay ?? 0);
+  const chips = [
+    `<span class="plan-chip plan-chip-flex" title="Flexible plan domains">Flexible ${(p.flexible ?? 0).toLocaleString()}</span>`,
+    `<span class="plan-chip plan-chip-annual" title="Annual commitment domains (${(p.annual_licences ?? 0).toLocaleString()} licences)">Annual ${annual.toLocaleString()}</span>`,
+  ];
+  if (p.trial) chips.push(`<span class="plan-chip plan-chip-trial" title="Trial domains">Trial ${p.trial.toLocaleString()}</span>`);
+  if (p.other) chips.push(`<span class="plan-chip plan-chip-trial">Other ${p.other.toLocaleString()}</span>`);
+  return `<div class="plan-chips">${chips.join('')}<span class="plan-chip-pct">${(p.annual_percent ?? 0).toFixed(0)}% annual</span></div>`;
+}
+
 function renderResellerList(resellers) {
   const container = document.getElementById('reseller-list');
   const loading = document.getElementById('resellers-loading');
@@ -290,6 +304,7 @@ function renderResellerList(resellers) {
         <div class="mini-quota-text">${r.licences_used.toLocaleString()} / ${r.max_licence_cap.toLocaleString()} licences used</div>
         <div class="mini-quota-bar"><div class="mini-quota-fill ${warnClass}" style="width:${Math.min(pct,100).toFixed(1)}%"></div></div>
       </div>
+      ${planChips(r.reseller_id)}
     `;
     container.appendChild(card);
   });
