@@ -426,15 +426,29 @@ class FirestoreStore(BaseStore):
         return results
 
     def list_all(self, collection: str) -> List[Dict[str, Any]]:
+        """Every document in the collection. Firestore returns at most one page (100 documents
+        by default) per call, so follow nextPageToken; stopping after one page silently drops
+        the rest and makes every count and list wrong once a collection grows."""
         url = f"{self._base_url}/{collection}"
-        resp = self._http().get(url, headers=self._get_headers(), timeout=_HTTP_TIMEOUT)
-        if resp.status_code == 200:
-            docs = resp.json().get("documents", [])
-            return [_firestore_doc_to_dict(d) for d in docs]
-        if resp.status_code == 403:
-            logger.error("firestore_list_permission_denied", collection=collection,
-                        hint="Grant 'Cloud Datastore User' IAM role to the service account in GCP Console")
-        return []
+        docs: List[dict] = []
+        token: Optional[str] = None
+        while True:
+            params = {"pageSize": 300}
+            if token:
+                params["pageToken"] = token
+            resp = self._http().get(url, headers=self._get_headers(), params=params, timeout=_HTTP_TIMEOUT)
+            if resp.status_code != 200:
+                if resp.status_code == 403:
+                    logger.error("firestore_list_permission_denied", collection=collection,
+                                 hint="Grant 'Cloud Datastore User' IAM role to the service account in GCP Console")
+                if docs:
+                    resp.raise_for_status()  # a half-read collection must not look complete
+                return []
+            body = resp.json()
+            docs.extend(body.get("documents", []))
+            token = body.get("nextPageToken")
+            if not token:
+                return [_firestore_doc_to_dict(d) for d in docs]
 
 
 # ---------------------------------------------------------------------------

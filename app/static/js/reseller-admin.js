@@ -12,6 +12,7 @@
 const API_BASE = '/api/v1/admin';
 let allResellers = [];
 let selectedReseller = null;
+let planSummary = null;
 let userEmail = null;
 
 const ROLE_PERMISSIONS = {
@@ -211,6 +212,35 @@ function updateStats(summary) {
   document.getElementById('stat-licences-val').textContent = (summary.total_licences_provisioned ?? 0).toLocaleString();
   document.getElementById('stat-cap-val').textContent = (summary.total_licence_cap ?? 0).toLocaleString();
   document.getElementById('stat-util-val').textContent = (summary.overall_utilization_percent ?? 0).toFixed(1) + '%';
+
+  planSummary = summary;
+  const plans = summary.plan_breakdown || {};
+  const annualPct = (plans.annual_percent ?? 0).toFixed(1);
+  document.getElementById('stat-flexible-val').textContent = (plans.flexible ?? 0).toLocaleString();
+  document.getElementById('stat-flexible-sub').textContent =
+    `${(plans.flexible_licences ?? 0).toLocaleString()} licences`;
+  document.getElementById('stat-annual-val').textContent = (plans.annual_total ?? 0).toLocaleString();
+  document.getElementById('stat-annual-sub').textContent =
+    `${annualPct}% of ${(plans.total ?? 0).toLocaleString()}` +
+    (summary.plan_mix_enabled ? ` · target ${summary.plan_mix_target_percent}%` : '');
+  if (selectedReseller) renderPlanMix(selectedReseller.reseller_id);
+}
+
+function renderPlanMix(resellerId) {
+  const all = (planSummary && planSummary.plan_breakdown_by_reseller) || {};
+  const p = all[resellerId] || {};
+  const total = p.total ?? 0;
+  const annualPct = p.annual_percent ?? 0;
+  document.getElementById('detail-plan-numbers').textContent = `${total.toLocaleString()} domain${total === 1 ? '' : 's'}`;
+  document.getElementById('detail-plan-flexible').textContent = (p.flexible ?? 0).toLocaleString();
+  document.getElementById('detail-plan-annual-monthly').textContent = (p.annual_monthly_pay ?? 0).toLocaleString();
+  document.getElementById('detail-plan-annual-yearly').textContent = (p.annual_yearly_pay ?? 0).toLocaleString();
+  document.getElementById('detail-plan-trial').textContent = (p.trial ?? 0).toLocaleString();
+  document.getElementById('detail-plan-bar').style.width = Math.min(annualPct, 100).toFixed(1) + '%';
+  document.getElementById('detail-plan-annual-pct').textContent =
+    `${annualPct.toFixed(1)}% annual` + (planSummary && planSummary.plan_mix_enabled ? ` (target ${planSummary.plan_mix_target_percent}%)` : '');
+  document.getElementById('detail-plan-licences').textContent =
+    `${(p.flexible_licences ?? 0).toLocaleString()} flexible · ${(p.annual_licences ?? 0).toLocaleString()} annual licences`;
 }
 
 // ---------------------------------------------------------------------------
@@ -317,6 +347,8 @@ function selectReseller(r) {
   bar.className = 'quota-bar-fill' + (pct >= 80 ? ' warn' : '');
   document.getElementById('detail-remaining').textContent = `${r.licences_remaining.toLocaleString()} remaining`;
   document.getElementById('detail-percent').textContent = pct.toFixed(1) + '%';
+
+  renderPlanMix(r.reseller_id);
 
   // Info grid
   document.getElementById('detail-id').textContent = r.reseller_id;

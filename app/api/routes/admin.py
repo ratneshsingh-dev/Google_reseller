@@ -448,7 +448,7 @@ async def get_audit_log(
     response_model=DashboardSummaryResponse,
     summary="Global reseller dashboard stats",
 )
-async def dashboard_summary(admin=Depends(require_admin)) -> DashboardSummaryResponse:
+def dashboard_summary(admin=Depends(require_admin)) -> DashboardSummaryResponse:
     """Get aggregate statistics across all reseller partners."""
     reseller_repo = ResellerRepository(get_store())
     resellers = reseller_repo.list_all()
@@ -462,6 +462,16 @@ async def dashboard_summary(admin=Depends(require_admin)) -> DashboardSummaryRes
 
     resellers.sort(key=lambda r: r.created_at or "", reverse=True)
 
+    from app.core.config import get_settings
+    from app.dependencies import get_company_repo, get_subscription_repo
+    from app.services.plan_stats import plan_breakdown
+
+    settings = get_settings()
+    overall_plans, plans_by_reseller = plan_breakdown(
+        get_company_repo().list_all(), get_subscription_repo().list_all()
+    )
+    every = settings.plan_mix_annual_every
+
     return DashboardSummaryResponse(
         total_resellers=total,
         active_resellers=active,
@@ -470,6 +480,10 @@ async def dashboard_summary(admin=Depends(require_admin)) -> DashboardSummaryRes
         total_licence_cap=total_cap,
         overall_utilization_percent=utilization,
         resellers=[_to_response(r) for r in resellers],
+        plan_breakdown=overall_plans,
+        plan_breakdown_by_reseller=plans_by_reseller,
+        plan_mix_enabled=settings.plan_mix_enabled,
+        plan_mix_target_percent=round(100 / every, 1) if settings.plan_mix_enabled and every > 0 else 0.0,
     )
 
 

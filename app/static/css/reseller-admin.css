@@ -742,3 +742,36 @@
 .btn-sm { padding: 0.3rem 0.65rem !important; font-size: 0.75rem !important; }
 .btn-warning { background: linear-gradient(135deg, #d97706, #b45309); color: white; border: none; }
 .btn-warning:hover { background: linear-gradient(135deg, #b45309, #92400e); }
+
+/* ---- Plan mix (Flexible vs Annual) ---- */
+.stats-bar { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+.stat-sub { margin-top: 0.35rem; font-size: 0.72rem; color: var(--text-muted); }
+.stat-flex .stat-number { color: #34d399; }
+.stat-annual .stat-number { color: #a78bfa; }
+
+.plan-section {
+  margin: 1rem 0 1.25rem;
+  padding: 1rem 1.25rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border-glass);
+  border-radius: var(--radius-md);
+}
+.plan-bar-bg {
+  height: 8px;
+  margin: 0.6rem 0 0.9rem;
+  border-radius: 999px;
+  background: rgba(52, 211, 153, 0.35);   /* flexible share */
+  overflow: hidden;
+}
+.plan-bar-annual {
+  height: 100%;
+  border-radius: 999px;
+  background: #a78bfa;                      /* annual share */
+  transition: width 0.4s ease;
+}
+.plan-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
