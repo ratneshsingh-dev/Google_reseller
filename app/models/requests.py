@@ -62,7 +62,8 @@ class ProvisioningRequest(BaseModel):
     alternate_email: str = Field(..., max_length=254)
     contact_name: str = Field(..., min_length=1, max_length=200)
     postal_address: PostalAddressRequest
-    plan: str = Field(..., pattern=r"^(FLEXIBLE|ANNUAL_MONTHLY_PAY|ANNUAL_YEARLY_PAY|TRIAL)$")
+    # Optional because, when the plan mix is enabled, the server chooses the plan and ignores this.
+    plan: Optional[str] = Field(default=None, pattern=r"^(FLEXIBLE|ANNUAL_MONTHLY_PAY|ANNUAL_YEARLY_PAY|TRIAL)$")
     sku_id: str = Field(..., min_length=1, max_length=100)
     license_count: int = Field(..., ge=1, description="Number of licences. For reseller API, upper bound is enforced by your quota.")
     initiated_by_email: str = Field(..., max_length=254)

@@ -12,6 +12,7 @@ exactly one of any number of simultaneous callers wins.
 from __future__ import annotations
 
 import hashlib
+import random
 import time
 import uuid
 from datetime import datetime, timezone
@@ -99,6 +100,38 @@ class IdempotencyRepository:
         current, version = self._store.get_versioned(self.COLLECTION, doc_id)
         if current and current.get("result_id") == result_id and version is not None:
             self._store.delete_if_version(self.COLLECTION, doc_id, version)
+
+
+class PlanMixRepository:
+    """Per-partner running counter that decides which domains get the commitment plan.
+
+    Slots are handed out atomically (compare-and-swap), so any number of parallel
+    requests, single or bulk, receive distinct consecutive slots and any run of N
+    consecutive slots contains exactly N/every commitment slots.
+    """
+
+    COLLECTION = "plan_mix_counters"
+    _ATTEMPTS = 30
+
+    def __init__(self, store: BaseStore) -> None:
+        self._store = store
+
+    def reserve(self, reseller_id: str, count: int) -> int:
+        """Claim `count` consecutive slots. Returns the counter value BEFORE them, so the
+        caller owns slots first+1 .. first+count."""
+        doc_id = _safe_id(reseller_id)
+        for attempt in range(self._ATTEMPTS):
+            data, version = self._store.get_versioned(self.COLLECTION, doc_id)
+            first = int(data["count"]) if data else 0
+            record = {
+                "reseller_id": reseller_id,
+                "count": first + count,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if self._store.set_if_version(self.COLLECTION, doc_id, record, version):
+                return first
+            time.sleep(random.uniform(0.005, 0.05) * (attempt + 1))
+        raise RuntimeError(f"Could not reserve plan slots for {reseller_id}: too much contention")
 
 
 def fingerprint(payload: object) -> str:

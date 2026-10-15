@@ -12,6 +12,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Optional, Tuple
 
+from app.core.config import get_settings
 from app.core.google_retry import call_with_retry
 from app.core.logging import get_logger
 from app.models.database import CompanyDocument, SubscriptionDocument
@@ -136,6 +137,13 @@ class DomainService:
         if delta == 0:
             return self._licence_result(company, plan, current, target, reseller,
                                         "No change: the domain already has this many licences.")
+        settings = get_settings()
+        if settings.plan_mix_enabled and target > settings.plan_mix_max_licences:
+            raise DomainActionError(400, {
+                "error": "Licence cap per domain exceeded",
+                "detail": (f"A domain can have at most {settings.plan_mix_max_licences} licences; "
+                           f"requested {target}."),
+            })
         if delta < 0 and plan not in REDUCIBLE_PLANS:
             raise DomainActionError(
                 400,

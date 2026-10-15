@@ -133,6 +133,8 @@ class ProvisioningService:
                 raise InsufficientSeatsError(
                     f"license_count ({request.license_count}) must be >= 1"
                 )
+            if not request.plan:
+                raise InsufficientSeatsError("A plan must be chosen before provisioning.")
             await self._complete_step(step_id)
 
             # --- Step 2: Create/retrieve customer ---

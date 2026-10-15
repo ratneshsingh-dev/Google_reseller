@@ -33,6 +33,7 @@ from app.repositories.audit_repository import AuditRepository
 from app.repositories.coordination_repository import (
     IdempotencyRepository,
     LockRepository,
+    PlanMixRepository,
     fingerprint,
 )
 from app.repositories.firestore_client import BaseStore
@@ -46,11 +47,20 @@ BATCH_COLLECTION = "provisioning_batches"
 _TERMINAL = {JobStatus.COMPLETED.value, JobStatus.PARTIAL_FAILURE.value, JobStatus.FAILED.value}
 
 
+COMMITMENT_PLAN = "ANNUAL_MONTHLY_PAY"
+DEFAULT_PLAN = "FLEXIBLE"
+
+
 class IntakeError(Exception):
     def __init__(self, status_code: int, detail: Any):
         super().__init__(str(detail))
         self.status_code = status_code
         self.detail = detail
+
+
+def plan_for_slot(slot: int, every: int) -> str:
+    """Slot numbers start at 1. Every `every`-th slot (4, 8, 12, ...) is the commitment plan."""
+    return COMMITMENT_PLAN if every > 0 and slot % every == 0 else DEFAULT_PLAN
 
 
 class ProvisioningIntake:
@@ -64,7 +74,9 @@ class ProvisioningIntake:
         audit_repo: AuditRepository,
         provisioning_service_factory,
         max_items: int = 100,
+        plan_mix_repo: Optional[PlanMixRepository] = None,
     ) -> None:
+        self._plan_mix = plan_mix_repo or PlanMixRepository(store)
         self._store = store
         self._jobs = job_repo
         self._resellers = reseller_repo
@@ -78,6 +90,19 @@ class ProvisioningIntake:
     # Single request
     # ------------------------------------------------------------------
 
+    def check_plan_rules(self, request: ProvisioningRequest) -> None:
+        """Rules that depend on the plan mix. Raises IntakeError(422) when a request breaks them."""
+        settings = get_settings()
+        if settings.plan_mix_enabled:
+            limit = settings.plan_mix_max_licences
+            if request.license_count > limit:
+                raise IntakeError(422, {
+                    "error": "Licence cap per domain exceeded",
+                    "detail": f"A domain can have at most {limit} licences; requested {request.license_count}.",
+                })
+        elif not request.plan:
+            raise IntakeError(422, "plan is required: one of TRIAL, FLEXIBLE, ANNUAL_MONTHLY_PAY, ANNUAL_YEARLY_PAY.")
+
     def accept(
         self,
         reseller: ResellerDocument,
@@ -85,10 +110,14 @@ class ProvisioningIntake:
         idempotency_key: Optional[str] = None,
         batch_id: Optional[str] = None,
         ip: str = "",
+        assigned_plan: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """`assigned_plan` is set by accept_bulk, which hands out its plan slots in one block;
+        for a single request the next slot of the partner's running counter is taken here."""
         job_id = f"JOB-{uuid.uuid4().hex[:8].upper()}"
         domain = request.primary_domain
         seats = request.license_count
+        self.check_plan_rules(request)
 
         if idempotency_key:
             fp = fingerprint(request.model_dump(mode="json"))
@@ -115,12 +144,20 @@ class ProvisioningIntake:
             raise IntakeError(400, exc.as_detail())
 
         try:
+            settings = get_settings()
+            if settings.plan_mix_enabled:
+                # Taken only now, after the request has passed every check, so refused requests
+                # never use up a slot and any 100 accepted requests contain exactly 25 commitments.
+                plan = assigned_plan or plan_for_slot(
+                    self._plan_mix.reserve(reseller.reseller_id, 1) + 1, settings.plan_mix_annual_every)
+                request = request.model_copy(update={"plan": plan})
             self._jobs.create_job(ProvisioningJobDocument(
                 job_id=job_id,
                 company_name=request.company_name,
                 primary_domain=domain,
                 status=JobStatus.PENDING.value,
                 reseller_id=reseller.reseller_id,
+                plan=request.plan,
                 licences_reserved=seats,
                 batch_id=batch_id,
                 request_payload=request.model_dump(mode="json"),
@@ -140,6 +177,7 @@ class ProvisioningIntake:
             "job_id": job_id,
             "status": JobStatus.PENDING.value,
             "primary_domain": domain,
+            "plan": request.plan,
             "quota_summary": QuotaSummary(
                 licences_assigned_now=seats,
                 total_licences_used=after.licences_used,
@@ -272,17 +310,39 @@ class ProvisioningIntake:
                     raise IntakeError(409, "This Idempotency-Key was already used for a different request.")
                 return self.batch_status(reseller, record["result_id"], replay=True)
 
-        def one(index: int, raw: Dict[str, Any]) -> Dict[str, Any]:
+        # Phase 1: validate every item. Invalid items are reported and never use a plan slot.
+        parsed: Dict[int, ProvisioningRequest] = {}
+        rejected: Dict[int, Dict[str, Any]] = {}
+        for index, raw in enumerate(items):
             domain = raw.get("primary_domain") if isinstance(raw, dict) else None
             try:
                 request = ProvisioningRequest(**raw)
+                self.check_plan_rules(request)
+                parsed[index] = request
             except (ValidationError, TypeError) as exc:
-                return {"index": index, "primary_domain": domain, "status_code": 422,
-                        "error": _validation_message(exc)}
+                rejected[index] = {"index": index, "primary_domain": domain, "status_code": 422,
+                                   "error": _validation_message(exc)}
+            except IntakeError as exc:
+                rejected[index] = {"index": index, "primary_domain": domain,
+                                   "status_code": exc.status_code, "error": exc.detail}
+
+        # Phase 2: one block of consecutive plan slots for all valid items, in list order, so
+        # 100 valid items always contain exactly 25 commitment-plan domains.
+        settings = get_settings()
+        plans: Dict[int, str] = {}
+        if settings.plan_mix_enabled and parsed:
+            first = self._plan_mix.reserve(reseller.reseller_id, len(parsed))
+            for position, index in enumerate(sorted(parsed), start=1):
+                plans[index] = plan_for_slot(first + position, settings.plan_mix_annual_every)
+
+        def one(index: int) -> Dict[str, Any]:
+            if index in rejected:
+                return rejected[index]
+            request = parsed[index]
             try:
-                result = self.accept(reseller, request, batch_id=batch_id, ip=ip)
+                result = self.accept(reseller, request, batch_id=batch_id, ip=ip, assigned_plan=plans.get(index))
                 return {"index": index, "primary_domain": request.primary_domain, "status_code": 202,
-                        "job_id": result["job_id"], "status": result["status"]}
+                        "job_id": result["job_id"], "status": result["status"], "plan": result["plan"]}
             except IntakeError as exc:
                 return {"index": index, "primary_domain": request.primary_domain,
                         "status_code": exc.status_code, "error": exc.detail}
@@ -292,7 +352,7 @@ class ProvisioningIntake:
                         "status_code": 500, "error": "Could not accept this request; try it again."}
 
         with ThreadPoolExecutor(max_workers=min(20, len(items)), thread_name_prefix="intake") as pool:
-            results = list(pool.map(lambda pair: one(*pair), enumerate(items)))
+            results = list(pool.map(one, range(len(items))))
 
         accepted = [r for r in results if r["status_code"] == 202]
         self._store.set(BATCH_COLLECTION, batch_id, {
