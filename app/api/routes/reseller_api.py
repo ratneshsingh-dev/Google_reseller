@@ -138,7 +138,11 @@ async def _accept(make_result) -> dict:
     try:
         return await asyncio.to_thread(make_result)
     except IntakeError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail, headers=_retry_headers(exc.status_code))
+
+
+def _retry_headers(status_code: int):
+    return {"Retry-After": "5"} if status_code == 503 else None
 
 
 @router.post(
@@ -555,7 +559,7 @@ async def _run_domain_action(coro) -> dict:
     try:
         return await job_executor.run_in_worker(lambda: coro)
     except DomainActionError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail, headers=_retry_headers(exc.status_code))
 
 
 def _client_ip(request: Request) -> str:

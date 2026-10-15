@@ -38,6 +38,7 @@ from app.repositories.coordination_repository import (
 )
 from app.repositories.firestore_client import BaseStore
 from app.repositories.job_repository import JobRepository
+from app.repositories.batching import ContentionError
 from app.repositories.reseller_repository import QuotaExceededError, ResellerRepository
 
 logger = get_logger(__name__)
@@ -56,6 +57,15 @@ class IntakeError(Exception):
         super().__init__(str(detail))
         self.status_code = status_code
         self.detail = detail
+
+
+def _busy() -> IntakeError:
+    return IntakeError(503, {
+        "error": "Service busy",
+        "detail": "Too many requests are being processed for your account at this moment. "
+                  "Nothing was created; please retry in a few seconds.",
+        "retry_after_seconds": 5,
+    })
 
 
 def plan_for_slot(slot: int, every: int) -> str:
@@ -142,6 +152,12 @@ class ProvisioningIntake:
             self._locks.release(domain, token)
             self._forget(reseller, idempotency_key, job_id)
             raise IntakeError(400, exc.as_detail())
+        except ContentionError as exc:
+            # Nothing was reserved, so release everything we took and let the client retry.
+            self._locks.release(domain, token)
+            self._forget(reseller, idempotency_key, job_id)
+            logger.error("quota_update_contention", reseller_id=reseller.reseller_id, domain=domain)
+            raise _busy() from exc
 
         try:
             settings = get_settings()
@@ -165,10 +181,12 @@ class ProvisioningIntake:
                 settled=False,
             ))
             job_dispatcher.dispatch(job_id, lambda: self.run_job(job_id))
-        except Exception:
+        except Exception as exc:
             self._resellers.increment_licences_used(reseller.reseller_id, -seats)
             self._locks.release(domain, token)
             self._forget(reseller, idempotency_key, job_id)
+            if isinstance(exc, ContentionError):
+                raise _busy() from exc
             raise
 
         self._record(reseller.reseller_id, "PROVISION", job_id, seats, ip, {"domain": domain, "batch_id": batch_id})
@@ -331,7 +349,11 @@ class ProvisioningIntake:
         settings = get_settings()
         plans: Dict[int, str] = {}
         if settings.plan_mix_enabled and parsed:
-            first = self._plan_mix.reserve(reseller.reseller_id, len(parsed))
+            try:
+                first = self._plan_mix.reserve(reseller.reseller_id, len(parsed))
+            except ContentionError as exc:
+                self._forget(reseller, idempotency_key, batch_id, scope=f"{reseller.reseller_id}:bulk")
+                raise _busy() from exc
             for position, index in enumerate(sorted(parsed), start=1):
                 plans[index] = plan_for_slot(first + position, settings.plan_mix_annual_every)
 
@@ -440,9 +462,9 @@ class ProvisioningIntake:
             ).model_dump(),
         }
 
-    def _forget(self, reseller: ResellerDocument, key: Optional[str], job_id: str) -> None:
+    def _forget(self, reseller: ResellerDocument, key: Optional[str], job_id: str, scope: Optional[str] = None) -> None:
         if key:
-            self._idempotency.forget(reseller.reseller_id, key, job_id)
+            self._idempotency.forget(scope or reseller.reseller_id, key, job_id)
 
     def _record(self, reseller_id: str, action: str, job_id: str, seats: int, ip: str, details: dict) -> None:
         try:
