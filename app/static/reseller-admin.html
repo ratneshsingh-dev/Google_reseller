@@ -87,6 +87,16 @@
         <div class="stat-number" id="stat-util-val">—</div>
         <div class="stat-label">Overall Utilization</div>
       </div>
+      <div class="stat-card stat-flex" id="stat-flexible" title="Customer domains on the Flexible plan (all partners)">
+        <div class="stat-number" id="stat-flexible-val">—</div>
+        <div class="stat-label">Flexible Domains</div>
+        <div class="stat-sub" id="stat-flexible-sub">&nbsp;</div>
+      </div>
+      <div class="stat-card stat-annual" id="stat-annual" title="Customer domains on a commitment plan (Annual Monthly Pay / Annual Yearly Pay), all partners">
+        <div class="stat-number" id="stat-annual-val">—</div>
+        <div class="stat-label">Annual (Commit) Domains</div>
+        <div class="stat-sub" id="stat-annual-sub">&nbsp;</div>
+      </div>
     </div>
 
     <!-- Main Content -->
@@ -168,6 +178,27 @@
             <div class="quota-footer">
               <span id="detail-remaining">0 remaining</span>
               <span id="detail-percent">0%</span>
+            </div>
+          </div>
+
+          <!-- Plan mix for this partner -->
+          <div class="plan-section" id="detail-plan-section">
+            <div class="quota-header">
+              <span class="quota-label">Plan Mix</span>
+              <span class="quota-numbers" id="detail-plan-numbers">0 domains</span>
+            </div>
+            <div class="plan-bar-bg">
+              <div class="plan-bar-annual" id="detail-plan-bar" style="width:0%"></div>
+            </div>
+            <div class="plan-grid">
+              <div><div class="info-label">Flexible</div><div class="info-value" id="detail-plan-flexible">0</div></div>
+              <div><div class="info-label">Annual Monthly</div><div class="info-value" id="detail-plan-annual-monthly">0</div></div>
+              <div><div class="info-label">Annual Yearly</div><div class="info-value" id="detail-plan-annual-yearly">0</div></div>
+              <div><div class="info-label">Trial</div><div class="info-value" id="detail-plan-trial">0</div></div>
+            </div>
+            <div class="quota-footer">
+              <span id="detail-plan-annual-pct">0% annual</span>
+              <span id="detail-plan-licences"></span>
             </div>
           </div>
 

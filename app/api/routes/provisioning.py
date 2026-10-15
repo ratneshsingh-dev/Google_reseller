@@ -60,6 +60,9 @@ async def provision_company(
     """Accept a provisioning request, create a job, and process in background."""
     import asyncio
 
+    if not request.plan:
+        raise HTTPException(status_code=422, detail="plan is required: TRIAL, FLEXIBLE, ANNUAL_MONTHLY_PAY or ANNUAL_YEARLY_PAY.")
+
     job_repo = get_job_repo()
 
     # Check idempotency

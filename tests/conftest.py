@@ -41,6 +41,11 @@ def reset_state():
     from app.core import job_executor
     from app.core.rate_limit import limiter
 
+    # A test that switches on the mock's random failures and then crashes would otherwise leave
+    # them on for every later test (flaky failures in unrelated tests). Start each test clean.
+    os.environ["MOCK_FAILURE_MODE"] = "false"
+    os.environ["MOCK_FAILURE_RATE"] = "0.0"
+
     job_executor.wait_until_idle(timeout=30)
     job_executor.reset()
     get_settings.cache_clear()

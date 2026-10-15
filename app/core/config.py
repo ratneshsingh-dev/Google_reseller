@@ -44,6 +44,14 @@ class Settings(BaseSettings):
     reconcile_interval_seconds: int = 300
     google_call_timeout_seconds: int = 60
 
+    # --- Plan mix: the server (not the client) decides each domain's plan ---
+    # When enabled, every Nth accepted domain per partner gets ANNUAL_MONTHLY_PAY (a one-year
+    # commitment) and the rest FLEXIBLE; the plan sent by the client is ignored. Off by default
+    # because it creates real paid subscriptions.
+    plan_mix_enabled: bool = False
+    plan_mix_annual_every: int = 4       # 4 -> 25% of domains on the commitment plan
+    plan_mix_max_licences: int = 5       # licence cap per domain while the mix is enabled
+
     # --- Cloud Tasks (used when job_backend == "cloudtasks") ---
     cloud_tasks_location: str = "us-central1"
     cloud_tasks_queue: str = ""

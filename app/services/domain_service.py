@@ -12,6 +12,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Optional, Tuple
 
+from app.core.config import get_settings
 from app.core.google_retry import call_with_retry
 from app.core.logging import get_logger
 from app.models.database import CompanyDocument, SubscriptionDocument
@@ -24,6 +25,7 @@ from app.models.reseller_models import AuditLogDocument, ResellerDocument
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.company_repository import CompanyRepository
 from app.repositories.coordination_repository import LockRepository
+from app.repositories.batching import ContentionError
 from app.repositories.reseller_repository import QuotaExceededError, ResellerRepository
 from app.repositories.subscription_repository import SubscriptionRepository
 from app.services.reseller_service import ResellerService
@@ -136,6 +138,13 @@ class DomainService:
         if delta == 0:
             return self._licence_result(company, plan, current, target, reseller,
                                         "No change: the domain already has this many licences.")
+        settings = get_settings()
+        if settings.plan_mix_enabled and target > settings.plan_mix_max_licences:
+            raise DomainActionError(400, {
+                "error": "Licence cap per domain exceeded",
+                "detail": (f"A domain can have at most {settings.plan_mix_max_licences} licences; "
+                           f"requested {target}."),
+            })
         if delta < 0 and plan not in REDUCIBLE_PLANS:
             raise DomainActionError(
                 400,
@@ -148,6 +157,13 @@ class DomainService:
                 self._resellers.adjust_licences_used(reseller.reseller_id, delta, enforce_cap=True)
             except QuotaExceededError as exc:
                 raise DomainActionError(400, exc.as_detail())
+            except ContentionError:
+                raise DomainActionError(503, {
+                    "error": "Service busy",
+                    "detail": "Too many requests are being processed for your account at this moment. "
+                              "Nothing was changed; please retry in a few seconds.",
+                    "retry_after_seconds": 5,
+                })
 
         try:
             await self._google_call(self._resize, company.google_customer_id, sub.subscription_id,

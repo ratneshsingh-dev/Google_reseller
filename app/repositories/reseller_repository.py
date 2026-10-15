@@ -4,15 +4,12 @@ Repository for the 'resellers' Firestore collection.
 
 from __future__ import annotations
 
-import random
-import time
 from datetime import datetime, timezone
 from typing import List, Optional
 
 from app.models.reseller_models import ResellerDocument
+from app.repositories.batching import ContentionError, update_document  # noqa: F401  (ContentionError re-exported)
 from app.repositories.firestore_client import BaseStore
-
-_CAS_ATTEMPTS = 30
 
 
 class QuotaExceededError(Exception):
@@ -91,25 +88,28 @@ class ResellerRepository:
         self.adjust_licences_used(reseller_id, count, enforce_cap=False)
 
     def adjust_licences_used(self, reseller_id: str, delta: int, enforce_cap: bool) -> ResellerDocument:
-        """Atomically change licences_used using compare-and-swap, retrying on conflict.
+        """Atomically change licences_used and return the partner's record as it is right after
+        THIS change. Concurrent calls for one partner are saved together in a single
+        compare-and-swap (see batching.update_document), so 30 parallel requests do not queue
+        for 30 writes.
 
         With enforce_cap=True the change is refused (QuotaExceededError) if it would exceed
         max_licence_cap, so parallel requests can never push a partner over their cap.
+        Raises ContentionError if the record stays too busy to save, KeyError if it is missing.
         """
-        for attempt in range(_CAS_ATTEMPTS):
-            data, version = self._store.get_versioned(self.COLLECTION, reseller_id)
-            if data is None:
-                raise KeyError(f"Reseller {reseller_id} not found")
+        def apply(data: dict) -> ResellerDocument:
             reseller = ResellerDocument(**data)
             new_used = max(0, reseller.licences_used + delta)
             if enforce_cap and delta > 0 and new_used > reseller.max_licence_cap:
                 raise QuotaExceededError(delta, reseller.licences_used, reseller.max_licence_cap)
             data["licences_used"] = new_used
             data["updated_at"] = datetime.now(timezone.utc).isoformat()
-            if self._store.set_if_version(self.COLLECTION, reseller_id, data, version):
-                return ResellerDocument(**data)
-            time.sleep(random.uniform(0.005, 0.05) * (attempt + 1))
-        raise RuntimeError(f"Could not update licence quota for {reseller_id}: too much contention")
+            return ResellerDocument(**data)
+
+        try:
+            return update_document(self._store, self.COLLECTION, reseller_id, apply)
+        except KeyError:
+            raise KeyError(f"Reseller {reseller_id} not found") from None
 
     def increment_token_version(self, reseller_id: str) -> int:
         """Increment token_version to revoke all active JWTs for this reseller.

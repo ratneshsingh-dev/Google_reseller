@@ -190,6 +190,20 @@ class ResellerCreatedResponse(ResellerResponse):
     client_secret: str   # Plain-text, shown once only
 
 
+class PlanBreakdown(BaseModel):
+    """Customer domains per plan. Counts are domains; *_licences are the licences on them."""
+    flexible: int = 0
+    annual_monthly_pay: int = 0
+    annual_yearly_pay: int = 0
+    trial: int = 0
+    other: int = 0
+    total: int = 0
+    annual_total: int = 0          # both commitment plans together
+    annual_percent: float = 0.0    # annual_total as a share of total
+    flexible_licences: int = 0
+    annual_licences: int = 0
+
+
 class DashboardSummaryResponse(BaseModel):
     """Returned by GET /admin/dashboard/summary."""
     total_resellers: int
@@ -199,6 +213,10 @@ class DashboardSummaryResponse(BaseModel):
     total_licence_cap: int
     overall_utilization_percent: float
     resellers: List[ResellerResponse]
+    plan_breakdown: PlanBreakdown = Field(default_factory=PlanBreakdown)
+    plan_breakdown_by_reseller: Dict[str, PlanBreakdown] = Field(default_factory=dict)
+    plan_mix_enabled: bool = False
+    plan_mix_target_percent: float = 0.0
 
 
 class AuditLogEntryResponse(BaseModel):

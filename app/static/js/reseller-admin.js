@@ -12,6 +12,7 @@
 const API_BASE = '/api/v1/admin';
 let allResellers = [];
 let selectedReseller = null;
+let planSummary = null;
 let userEmail = null;
 
 const ROLE_PERMISSIONS = {
@@ -211,11 +212,54 @@ function updateStats(summary) {
   document.getElementById('stat-licences-val').textContent = (summary.total_licences_provisioned ?? 0).toLocaleString();
   document.getElementById('stat-cap-val').textContent = (summary.total_licence_cap ?? 0).toLocaleString();
   document.getElementById('stat-util-val').textContent = (summary.overall_utilization_percent ?? 0).toFixed(1) + '%';
+
+  planSummary = summary;
+  const plans = summary.plan_breakdown || {};
+  const annualPct = (plans.annual_percent ?? 0).toFixed(1);
+  document.getElementById('stat-flexible-val').textContent = (plans.flexible ?? 0).toLocaleString();
+  document.getElementById('stat-flexible-sub').textContent =
+    `${(plans.flexible_licences ?? 0).toLocaleString()} licences`;
+  document.getElementById('stat-annual-val').textContent = (plans.annual_total ?? 0).toLocaleString();
+  document.getElementById('stat-annual-sub').textContent =
+    `${annualPct}% of ${(plans.total ?? 0).toLocaleString()}` +
+    (summary.plan_mix_enabled ? ` · target ${summary.plan_mix_target_percent}%` : '');
+  if (selectedReseller) renderPlanMix(selectedReseller.reseller_id);
+}
+
+function renderPlanMix(resellerId) {
+  const all = (planSummary && planSummary.plan_breakdown_by_reseller) || {};
+  const p = all[resellerId] || {};
+  const total = p.total ?? 0;
+  const annualPct = p.annual_percent ?? 0;
+  document.getElementById('detail-plan-numbers').textContent = `${total.toLocaleString()} domain${total === 1 ? '' : 's'}`;
+  document.getElementById('detail-plan-flexible').textContent = (p.flexible ?? 0).toLocaleString();
+  document.getElementById('detail-plan-annual-monthly').textContent = (p.annual_monthly_pay ?? 0).toLocaleString();
+  document.getElementById('detail-plan-annual-yearly').textContent = (p.annual_yearly_pay ?? 0).toLocaleString();
+  document.getElementById('detail-plan-trial').textContent = (p.trial ?? 0).toLocaleString();
+  document.getElementById('detail-plan-bar').style.width = Math.min(annualPct, 100).toFixed(1) + '%';
+  document.getElementById('detail-plan-annual-pct').textContent =
+    `${annualPct.toFixed(1)}% annual` + (planSummary && planSummary.plan_mix_enabled ? ` (target ${planSummary.plan_mix_target_percent}%)` : '');
+  document.getElementById('detail-plan-licences').textContent =
+    `${(p.flexible_licences ?? 0).toLocaleString()} flexible · ${(p.annual_licences ?? 0).toLocaleString()} annual licences`;
 }
 
 // ---------------------------------------------------------------------------
 // Render Reseller List
 // ---------------------------------------------------------------------------
+
+// Flexible / Annual / Trial counts for one partner, shown on its card in the list.
+function planChips(resellerId) {
+  const p = ((planSummary && planSummary.plan_breakdown_by_reseller) || {})[resellerId];
+  if (!p || !p.total) return '<div class="plan-chips"><span class="plan-chip plan-chip-none">No domains yet</span></div>';
+  const annual = (p.annual_monthly_pay ?? 0) + (p.annual_yearly_pay ?? 0);
+  const chips = [
+    `<span class="plan-chip plan-chip-flex" title="Flexible plan domains">Flexible ${(p.flexible ?? 0).toLocaleString()}</span>`,
+    `<span class="plan-chip plan-chip-annual" title="Annual commitment domains (${(p.annual_licences ?? 0).toLocaleString()} licences)">Annual ${annual.toLocaleString()}</span>`,
+  ];
+  if (p.trial) chips.push(`<span class="plan-chip plan-chip-trial" title="Trial domains">Trial ${p.trial.toLocaleString()}</span>`);
+  if (p.other) chips.push(`<span class="plan-chip plan-chip-trial">Other ${p.other.toLocaleString()}</span>`);
+  return `<div class="plan-chips">${chips.join('')}<span class="plan-chip-pct">${(p.annual_percent ?? 0).toFixed(0)}% annual</span></div>`;
+}
 
 function renderResellerList(resellers) {
   const container = document.getElementById('reseller-list');
@@ -260,6 +304,7 @@ function renderResellerList(resellers) {
         <div class="mini-quota-text">${r.licences_used.toLocaleString()} / ${r.max_licence_cap.toLocaleString()} licences used</div>
         <div class="mini-quota-bar"><div class="mini-quota-fill ${warnClass}" style="width:${Math.min(pct,100).toFixed(1)}%"></div></div>
       </div>
+      ${planChips(r.reseller_id)}
     `;
     container.appendChild(card);
   });
@@ -317,6 +362,8 @@ function selectReseller(r) {
   bar.className = 'quota-bar-fill' + (pct >= 80 ? ' warn' : '');
   document.getElementById('detail-remaining').textContent = `${r.licences_remaining.toLocaleString()} remaining`;
   document.getElementById('detail-percent').textContent = pct.toFixed(1) + '%';
+
+  renderPlanMix(r.reseller_id);
 
   // Info grid
   document.getElementById('detail-id').textContent = r.reseller_id;

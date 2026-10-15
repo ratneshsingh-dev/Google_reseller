@@ -17,6 +17,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional, Tuple
 
+from app.repositories.batching import update_document
 from app.repositories.firestore_client import BaseStore
 
 
@@ -99,6 +100,32 @@ class IdempotencyRepository:
         current, version = self._store.get_versioned(self.COLLECTION, doc_id)
         if current and current.get("result_id") == result_id and version is not None:
             self._store.delete_if_version(self.COLLECTION, doc_id, version)
+
+
+class PlanMixRepository:
+    """Per-partner running counter that decides which domains get the commitment plan.
+
+    Slots are handed out atomically (compare-and-swap), so any number of parallel
+    requests, single or bulk, receive distinct consecutive slots and any run of N
+    consecutive slots contains exactly N/every commitment slots.
+    """
+
+    COLLECTION = "plan_mix_counters"
+
+    def __init__(self, store: BaseStore) -> None:
+        self._store = store
+
+    def reserve(self, reseller_id: str, count: int) -> int:
+        """Claim `count` consecutive slots. Returns the counter value BEFORE them, so the
+        caller owns slots first+1 .. first+count. Simultaneous callers share one write."""
+        def take(data: dict) -> int:
+            first = int(data.get("count", 0))
+            data["count"] = first + count
+            data["updated_at"] = datetime.now(timezone.utc).isoformat()
+            return first
+
+        return update_document(self._store, self.COLLECTION, _safe_id(reseller_id), take,
+                               missing={"reseller_id": reseller_id, "count": 0})
 
 
 def fingerprint(payload: object) -> str:
