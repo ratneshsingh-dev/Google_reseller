@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Licence Usage | Channel Partner Admin</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 1.5rem 1rem 3rem; font-family: 'Outfit', sans-serif; color: var(--text-primary, #e8eaf6); }
+    .top { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: .75rem; margin-bottom: 1rem; }
+    .top h1 { font-size: 1.35rem; margin: 0; }
+    .controls { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+    .controls select, .controls a, .controls button { padding: .4rem .7rem; border-radius: 8px; border: 1px solid rgba(255,255,255,.15); background: rgba(255,255,255,.06); color: inherit; font: inherit; font-size: .85rem; text-decoration: none; cursor: pointer; }
+    .controls select option { color: #111; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .75rem; margin-bottom: 1.25rem; }
+    .card { border: 1px solid rgba(255,255,255,.12); border-radius: 12px; padding: .8rem 1rem; background: rgba(255,255,255,.04); }
+    .card .n { font-size: 1.6rem; font-weight: 700; }
+    .card .l { font-size: .75rem; opacity: .7; text-transform: uppercase; letter-spacing: .04em; }
+    .pos { color: #34d399; } .neg { color: #f87171; }
+    .chart { border: 1px solid rgba(255,255,255,.12); border-radius: 12px; padding: 1rem; margin-bottom: 1.25rem; overflow-x: auto; }
+    .bars { display: flex; align-items: flex-end; gap: 3px; height: 130px; min-width: 100%; }
+    .bar { flex: 1 1 0; min-width: 6px; background: #6366f1; border-radius: 3px 3px 0 0; position: relative; }
+    .bar:hover::after { content: attr(data-tip); position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); background: #111; color: #fff; padding: 3px 7px; border-radius: 6px; font-size: .72rem; white-space: nowrap; z-index: 2; }
+    .axis { display: flex; justify-content: space-between; font-size: .72rem; opacity: .6; margin-top: .35rem; }
+    table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+    th, td { padding: .5rem .6rem; text-align: right; border-bottom: 1px solid rgba(255,255,255,.08); }
+    th:first-child, td:first-child { text-align: left; }
+    th { font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; opacity: .7; position: sticky; top: 0; background: var(--bg-primary, #0b0e1a); }
+    .tablewrap { border: 1px solid rgba(255,255,255,.12); border-radius: 12px; overflow: auto; max-height: 460px; margin-bottom: 1.25rem; }
+    h2 { font-size: 1rem; margin: 1.25rem 0 .5rem; }
+    .note { font-size: .78rem; opacity: .65; margin-top: .5rem; }
+    .msg { padding: 2rem; text-align: center; opacity: .8; }
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <div class="top">
+      <h1>Licence usage by date</h1>
+      <div class="controls">
+        <select id="partner"><option value="">All partners</option></select>
+        <select id="days">
+          <option value="7">Last 7 days</option>
+          <option value="30" selected>Last 30 days</option>
+          <option value="90">Last 90 days</option>
+          <option value="365">Last 365 days</option>
+        </select>
+        <button id="csv" type="button">Download CSV</button>
+        <a href="/static/reseller-admin.html">← Admin panel</a>
+      </div>
+    </div>
+
+    <div id="msg" class="msg">Loading…</div>
+    <div id="content" style="display:none;">
+      <div class="cards" id="cards"></div>
+      <div class="chart">
+        <div class="l" style="font-size:.75rem;opacity:.7;margin-bottom:.5rem;">NET LICENCE CHANGE PER DAY (hover a bar)</div>
+        <div class="bars" id="bars"></div>
+        <div class="axis"><span id="ax-from"></span><span id="ax-to"></span></div>
+      </div>
+      <h2>Day by day</h2>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Date</th><th>New domains</th><th>Licences on new domains</th><th>Added later</th><th>Removed</th><th>Released (transfer)</th><th>Failed jobs</th><th>Net</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table></div>
+      <h2>By partner (this period)</h2>
+      <div class="tablewrap"><table>
+        <thead><tr><th>Partner</th><th>New domains</th><th>Licences on new domains</th><th>Added later</th><th>Removed</th><th>Released (transfer)</th><th>Failed jobs</th><th>Net</th></tr></thead>
+        <tbody id="partners"></tbody>
+      </table></div>
+      <p class="note">Days are in India time (IST). "New domains" counts only jobs that completed; failed jobs get their licences back and are shown separately.
+        Net = licences on new domains + added later − removed − released. Changes made before this report existed may be missing from "Added later / Removed / Released".</p>
+    </div>
+  </div>
+
+  <script>
+    const API = '/api/v1/admin';
+    const $ = id => document.getElementById(id);
+    let lastData = null;
+
+    async function get(path) {
+      const res = await fetch(API + path, { credentials: 'include' });
+      if (res.status === 401 || res.status === 403) throw new Error('auth');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      return res.json();
+    }
+    const esc = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const sign = n => (n > 0 ? '+' : '') + n;
+    const cls = n => n > 0 ? 'pos' : (n < 0 ? 'neg' : '');
+
+    function render(d) {
+      lastData = d;
+      const t = d.totals;
+      $('cards').innerHTML = [
+        ['New domains', t.domains_created], ['Licences on new domains', t.licences_new],
+        ['Added later', t.licences_added_later], ['Removed', t.licences_removed],
+        ['Released (transfer)', t.licences_released], ['Failed jobs', t.failed_jobs],
+        ['Net change', sign(t.net_change), cls(t.net_change)],
+      ].map(([l, n, c]) => `<div class="card"><div class="n ${c || ''}">${esc(n)}</div><div class="l">${esc(l)}</div></div>`).join('');
+
+      const asc = [...d.daily].reverse();
+      const max = Math.max(1, ...asc.map(r => Math.abs(r.net_change)));
+      $('bars').innerHTML = asc.map(r => {
+        const h = r.net_change === 0 ? 2 : Math.max(4, Math.round(Math.abs(r.net_change) / max * 130));
+        const color = r.net_change < 0 ? '#f87171' : '#6366f1';
+        return `<div class="bar" style="height:${h}px;background:${color}" data-tip="${esc(r.date)}: ${sign(r.net_change)} (${r.domains_created} domains)"></div>`;
+      }).join('');
+      $('ax-from').textContent = d.from; $('ax-to').textContent = d.to;
+
+      const tr = r => `<td>${esc(r.domains_created)}</td><td>${esc(r.licences_new)}</td><td>${esc(r.licences_added_later)}</td><td>${esc(r.licences_removed)}</td><td>${esc(r.licences_released)}</td><td>${esc(r.failed_jobs)}</td><td class="${cls(r.net_change)}">${sign(r.net_change)}</td>`;
+      $('rows').innerHTML = d.daily.map(r => `<tr><td>${esc(r.date)}</td>${tr(r)}</tr>`).join('');
+      $('partners').innerHTML = d.by_partner.length
+        ? d.by_partner.map(r => `<tr><td>${esc(r.reseller_id)}</td>${tr(r)}</tr>`).join('')
+        : '<tr><td colspan="8" style="text-align:center;opacity:.6">No activity in this period</td></tr>';
+      $('msg').style.display = 'none'; $('content').style.display = 'block';
+    }
+
+    async function load() {
+      $('msg').style.display = 'block'; $('msg').textContent = 'Loading…'; $('content').style.display = 'none';
+      try {
+        const q = new URLSearchParams({ days: $('days').value });
+        if ($('partner').value) q.set('reseller_id', $('partner').value);
+        render(await get('/licence-usage?' + q));
+      } catch (e) {
+        $('msg').innerHTML = e.message === 'auth'
+          ? 'Please sign in on the <a href="/static/reseller-admin.html">admin panel</a> first, then reopen this page.'
+          : 'Could not load the report (' + esc(e.message) + '). Try again.';
+      }
+    }
+
+    function downloadCsv() {
+      if (!lastData) return;
+      const head = ['date', 'new_domains', 'licences_new', 'added_later', 'removed', 'released_transfer', 'failed_jobs', 'net_change'];
+      const lines = [head.join(',')].concat(lastData.daily.map(r =>
+        [r.date, r.domains_created, r.licences_new, r.licences_added_later, r.licences_removed, r.licences_released, r.failed_jobs, r.net_change].join(',')));
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/csv' }));
+      a.download = `licence-usage-${lastData.from}_to_${lastData.to}.csv`; a.click();
+    }
+
+    (async () => {
+      try {
+        const list = await get('/resellers');
+        const rows = Array.isArray(list) ? list : (list.resellers || []);
+        rows.forEach(r => { const o = document.createElement('option'); o.value = r.reseller_id; o.textContent = `${r.company_name} (${r.reseller_id})`; $('partner').appendChild(o); });
+      } catch (e) { /* partner filter is optional */ }
+      $('partner').onchange = load; $('days').onchange = load; $('csv').onclick = downloadCsv;
+      load();
+    })();
+  </script>
+</body>
+
+</html>

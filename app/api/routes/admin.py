@@ -17,9 +17,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from app.core.auth_middleware import require_admin
 from app.core.jwt_service import (
@@ -484,6 +484,22 @@ def dashboard_summary(admin=Depends(require_admin)) -> DashboardSummaryResponse:
         plan_breakdown_by_reseller=plans_by_reseller,
         plan_mix_enabled=settings.plan_mix_enabled,
         plan_mix_target_percent=round(100 / every, 1) if settings.plan_mix_enabled and every > 0 else 0.0,
+    )
+
+
+@router.get("/licence-usage", summary="Day-by-day licence usage (read-only)")
+def licence_usage_report(
+    days: int = Query(30, ge=1, le=365),
+    reseller_id: Optional[str] = Query(None),
+    admin=Depends(require_admin),
+) -> dict:
+    """Licences added to new domains, added/removed later, and released by transfers, per day (IST)."""
+    from app.dependencies import get_job_repo
+    from app.services.licence_usage import licence_usage
+
+    return licence_usage(
+        get_job_repo().list_all_jobs(), AuditRepository(get_store()).list_all(),
+        days=days, reseller_id=reseller_id,
     )
 
 
