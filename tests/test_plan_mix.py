@@ -178,22 +178,32 @@ class TestLicenceCap:
     def test_5_licences_is_allowed(self, mix_on, queued):
         assert queued.accept(_reseller(), _request("five.test", seats=5))["status"] == "PENDING"
 
-    def test_6_to_10_licences_is_always_flexible_and_uses_no_plan_slot(self, mix_on, queued):
+    def test_flexible_domains_get_what_they_ask_up_to_10(self, mix_on, queued):
         reseller = _reseller()
-        big = [queued.accept(reseller, _request(f"big{i}.test", seats=10 if i == 0 else 6)) for i in range(5)]
-        assert [r["plan"] for r in big] == [FLEX] * 5
-        # none of them used a slot, so the 4th small domain is the first annual one
-        small = [queued.accept(reseller, _request(f"small{i}.test", seats=2))["plan"] for i in range(4)]
-        assert small == [FLEX, FLEX, FLEX, ANNUAL]
+        got = [queued.accept(reseller, _request(f"f{i}.test", seats=n)) for i, n in enumerate((2, 4, 10))]
+        assert [r["plan"] for r in got] == [FLEX] * 3
+        assert [r["quota_summary"]["licences_assigned_now"] for r in got] == [2, 4, 10]
+        assert all("note" not in r for r in got)
 
-    def test_bulk_big_domains_take_no_slot_and_the_rest_keep_the_25_percent(self, mix_on, queued):
+    def test_every_4th_request_is_annual_and_is_cut_to_5_if_it_asked_for_more(self, mix_on, queued):
+        reseller = _reseller()
+        got = [queued.accept(reseller, _request(f"m{i}.test", seats=n)) for i, n in enumerate((2, 6, 10, 9))]
+        assert [r["plan"] for r in got] == [FLEX, FLEX, FLEX, ANNUAL]
+        assert [r["quota_summary"]["licences_assigned_now"] for r in got] == [2, 6, 10, 5]
+        assert got[3]["licences_requested"] == 9 and "at most 5" in got[3]["note"]
+        assert get_reseller_repo().get_by_id("RSL-M1").licences_used == 2 + 6 + 10 + 5   # extra 4 handed back
+        job = get_job_repo().get_job(got[3]["job_id"])
+        assert job.licences_reserved == 5 and job.request_payload["license_count"] == 5
+
+    def test_bulk_keeps_25_percent_even_with_big_requests(self, mix_on, queued):
         items = [_payload(f"b{i}.test") for i in range(8)]
-        for i in (1, 4):
-            items[i]["license_count"] = 8
+        for i in (1, 3, 7):
+            items[i]["license_count"] = 9
         result = queued.accept_bulk(_reseller(), items)
-        by_index = {r["index"]: r["plan"] for r in result["results"]}
-        assert by_index[1] == FLEX and by_index[4] == FLEX
-        assert [by_index[i] for i in (0, 2, 3, 5, 6, 7)] == [FLEX, FLEX, FLEX, ANNUAL, FLEX, FLEX]
+        by_index = {r["index"]: r for r in result["results"]}
+        assert [by_index[i]["plan"] for i in range(8)] == [FLEX, FLEX, FLEX, ANNUAL, FLEX, FLEX, FLEX, ANNUAL]
+        assert by_index[3]["licences_requested"] == 9 and by_index[7]["licences_requested"] == 9
+        assert "licences_requested" not in by_index[1]
 
     def test_increasing_a_flexible_domain_up_to_10_is_allowed_but_not_past_it(self, mix_on, client):
         reseller = _reseller()
