@@ -104,11 +104,15 @@ class ProvisioningIntake:
         """Rules that depend on the plan mix. Raises IntakeError(422) when a request breaks them."""
         settings = get_settings()
         if settings.plan_mix_enabled:
-            limit = settings.plan_mix_max_licences
+            # The widest cap is checked here. A request above the commitment cap is not refused:
+            # if it lands on a commitment slot it is reduced to that cap (see accept).
+            limit = settings.plan_mix_flexible_max_licences
             if request.license_count > limit:
                 raise IntakeError(422, {
                     "error": "Licence cap per domain exceeded",
-                    "detail": f"A domain can have at most {limit} licences; requested {request.license_count}.",
+                    "detail": (f"A domain can have at most {limit} licences on the Flexible plan "
+                               f"and {settings.plan_mix_max_licences} on the Annual (commitment) plan; "
+                               f"requested {request.license_count}."),
                 })
         elif not request.plan:
             raise IntakeError(422, "plan is required: one of TRIAL, FLEXIBLE, ANNUAL_MONTHLY_PAY, ANNUAL_YEARLY_PAY.")
@@ -127,6 +131,7 @@ class ProvisioningIntake:
         job_id = f"JOB-{uuid.uuid4().hex[:8].upper()}"
         domain = request.primary_domain
         seats = request.license_count
+        requested_seats = seats
         self.check_plan_rules(request)
 
         if idempotency_key:
@@ -167,6 +172,13 @@ class ProvisioningIntake:
                 plan = assigned_plan or plan_for_slot(
                     self._plan_mix.reserve(reseller.reseller_id, 1) + 1, settings.plan_mix_annual_every)
                 request = request.model_copy(update={"plan": plan})
+                if plan == COMMITMENT_PLAN and seats > settings.plan_mix_max_licences:
+                    # Every 4th domain is a commitment domain and holds at most 5 licences: keep the
+                    # slot, give it 5, and hand the rest of the reservation back.
+                    cap = settings.plan_mix_max_licences
+                    after = self._resellers.adjust_licences_used(reseller.reseller_id, cap - seats, enforce_cap=False)
+                    seats = cap
+                    request = request.model_copy(update={"license_count": cap})
             self._jobs.create_job(ProvisioningJobDocument(
                 job_id=job_id,
                 company_name=request.company_name,
@@ -191,7 +203,15 @@ class ProvisioningIntake:
 
         self._record(reseller.reseller_id, "PROVISION", job_id, seats, ip, {"domain": domain, "batch_id": batch_id})
         logger.info("provision_accepted", job_id=job_id, domain=domain, reseller_id=reseller.reseller_id, seats=seats)
+        reduced = {}
+        if seats < requested_seats:
+            reduced = {
+                "licences_requested": requested_seats,
+                "note": (f"{requested_seats} licences were requested but this domain is on the "
+                         f"{request.plan} plan, which holds at most {seats}. {seats} were reserved."),
+            }
         return {
+            **reduced,
             "job_id": job_id,
             "status": JobStatus.PENDING.value,
             "primary_domain": domain,
@@ -364,7 +384,8 @@ class ProvisioningIntake:
             try:
                 result = self.accept(reseller, request, batch_id=batch_id, ip=ip, assigned_plan=plans.get(index))
                 return {"index": index, "primary_domain": request.primary_domain, "status_code": 202,
-                        "job_id": result["job_id"], "status": result["status"], "plan": result["plan"]}
+                        "job_id": result["job_id"], "status": result["status"], "plan": result["plan"],
+                        **{k: result[k] for k in ("licences_requested", "note") if k in result}}
             except IntakeError as exc:
                 return {"index": index, "primary_domain": request.primary_domain,
                         "status_code": exc.status_code, "error": exc.detail}
