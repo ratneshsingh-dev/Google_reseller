@@ -104,14 +104,24 @@ class ProvisioningIntake:
         """Rules that depend on the plan mix. Raises IntakeError(422) when a request breaks them."""
         settings = get_settings()
         if settings.plan_mix_enabled:
-            limit = settings.plan_mix_max_licences
+            # The widest cap is checked here; a request above the commitment cap is made FLEXIBLE
+            # (see _forced_flexible), so only more than the flexible cap is refused outright.
+            limit = settings.plan_mix_flexible_max_licences
             if request.license_count > limit:
                 raise IntakeError(422, {
                     "error": "Licence cap per domain exceeded",
-                    "detail": f"A domain can have at most {limit} licences; requested {request.license_count}.",
+                    "detail": (f"A domain can have at most {limit} licences on the Flexible plan "
+                               f"and {settings.plan_mix_max_licences} on the Annual (commitment) plan; "
+                               f"requested {request.license_count}."),
                 })
         elif not request.plan:
             raise IntakeError(422, "plan is required: one of TRIAL, FLEXIBLE, ANNUAL_MONTHLY_PAY, ANNUAL_YEARLY_PAY.")
+
+    @staticmethod
+    def _forced_flexible(request: ProvisioningRequest) -> bool:
+        """With the mix on, a domain asking for more licences than a commitment domain may hold is
+        always FLEXIBLE and does not use up a plan slot (so the 1-in-4 pattern is unaffected)."""
+        return request.license_count > get_settings().plan_mix_max_licences
 
     def accept(
         self,
@@ -164,8 +174,11 @@ class ProvisioningIntake:
             if settings.plan_mix_enabled:
                 # Taken only now, after the request has passed every check, so refused requests
                 # never use up a slot and any 100 accepted requests contain exactly 25 commitments.
-                plan = assigned_plan or plan_for_slot(
-                    self._plan_mix.reserve(reseller.reseller_id, 1) + 1, settings.plan_mix_annual_every)
+                if self._forced_flexible(request):
+                    plan = DEFAULT_PLAN        # too many licences for a commitment domain: no slot used
+                else:
+                    plan = assigned_plan or plan_for_slot(
+                        self._plan_mix.reserve(reseller.reseller_id, 1) + 1, settings.plan_mix_annual_every)
                 request = request.model_copy(update={"plan": plan})
             self._jobs.create_job(ProvisioningJobDocument(
                 job_id=job_id,
@@ -348,13 +361,15 @@ class ProvisioningIntake:
         # 100 valid items always contain exactly 25 commitment-plan domains.
         settings = get_settings()
         plans: Dict[int, str] = {}
-        if settings.plan_mix_enabled and parsed:
+        # Items that are forced to FLEXIBLE (too many licences for a commitment domain) take no slot.
+        slotted = sorted(i for i, r in parsed.items() if not self._forced_flexible(r))
+        if settings.plan_mix_enabled and slotted:
             try:
-                first = self._plan_mix.reserve(reseller.reseller_id, len(parsed))
+                first = self._plan_mix.reserve(reseller.reseller_id, len(slotted))
             except ContentionError as exc:
                 self._forget(reseller, idempotency_key, batch_id, scope=f"{reseller.reseller_id}:bulk")
                 raise _busy() from exc
-            for position, index in enumerate(sorted(parsed), start=1):
+            for position, index in enumerate(slotted, start=1):
                 plans[index] = plan_for_slot(first + position, settings.plan_mix_annual_every)
 
         def one(index: int) -> Dict[str, Any]:

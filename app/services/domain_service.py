@@ -139,12 +139,15 @@ class DomainService:
             return self._licence_result(company, plan, current, target, reseller,
                                         "No change: the domain already has this many licences.")
         settings = get_settings()
-        if settings.plan_mix_enabled and target > settings.plan_mix_max_licences:
-            raise DomainActionError(400, {
-                "error": "Licence cap per domain exceeded",
-                "detail": (f"A domain can have at most {settings.plan_mix_max_licences} licences; "
-                           f"requested {target}."),
-            })
+        if settings.plan_mix_enabled:
+            limit = (settings.plan_mix_flexible_max_licences if plan == "FLEXIBLE"
+                     else settings.plan_mix_max_licences)
+            if target > limit:
+                raise DomainActionError(400, {
+                    "error": "Licence cap per domain exceeded",
+                    "detail": (f"A {plan} domain can have at most {limit} licences; "
+                               f"requested {target}."),
+                })
         if delta < 0 and plan not in REDUCIBLE_PLANS:
             raise DomainActionError(
                 400,

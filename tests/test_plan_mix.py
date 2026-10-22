@@ -1,6 +1,6 @@
 """Plan mix: with PLAN_MIX_ENABLED the server decides each domain's plan (every 4th accepted
 domain per partner is ANNUAL_MONTHLY_PAY, the rest FLEXIBLE), ignoring the client's plan,
-with at most 5 licences per domain. Offline: mock Google, in-memory store."""
+with at most 10 licences on a Flexible domain and 5 on an annual (commitment) domain. Offline: mock Google, in-memory store."""
 
 from __future__ import annotations
 
@@ -153,7 +153,7 @@ class TestBulk:
     def test_invalid_items_do_not_use_slots(self, mix_on, queued):
         reseller = _reseller()
         items = [_payload(f"v{i}.test") for i in range(8)]
-        items[1]["license_count"] = 6          # over the cap
+        items[1]["license_count"] = 11         # over the cap
         items[5]["primary_domain"] = "not a domain"
         result = queued.accept_bulk(reseller, items)
         assert result["accepted"] == 6 and result["rejected"] == 2
@@ -170,23 +170,50 @@ class TestBulk:
 
 
 class TestLicenceCap:
-    def test_more_than_5_licences_is_refused(self, mix_on, queued):
+    def test_more_than_10_licences_is_refused(self, mix_on, queued):
         with pytest.raises(IntakeError) as exc:
-            queued.accept(_reseller(), _request("six.test", seats=6))
-        assert exc.value.status_code == 422 and "at most 5" in exc.value.detail["detail"]
+            queued.accept(_reseller(), _request("eleven.test", seats=11))
+        assert exc.value.status_code == 422 and "at most 10" in exc.value.detail["detail"]
 
     def test_5_licences_is_allowed(self, mix_on, queued):
         assert queued.accept(_reseller(), _request("five.test", seats=5))["status"] == "PENDING"
 
-    def test_increasing_an_existing_domain_past_5_is_refused(self, mix_on, client):
+    def test_6_to_10_licences_is_always_flexible_and_uses_no_plan_slot(self, mix_on, queued):
+        reseller = _reseller()
+        big = [queued.accept(reseller, _request(f"big{i}.test", seats=10 if i == 0 else 6)) for i in range(5)]
+        assert [r["plan"] for r in big] == [FLEX] * 5
+        # none of them used a slot, so the 4th small domain is the first annual one
+        small = [queued.accept(reseller, _request(f"small{i}.test", seats=2))["plan"] for i in range(4)]
+        assert small == [FLEX, FLEX, FLEX, ANNUAL]
+
+    def test_bulk_big_domains_take_no_slot_and_the_rest_keep_the_25_percent(self, mix_on, queued):
+        items = [_payload(f"b{i}.test") for i in range(8)]
+        for i in (1, 4):
+            items[i]["license_count"] = 8
+        result = queued.accept_bulk(_reseller(), items)
+        by_index = {r["index"]: r["plan"] for r in result["results"]}
+        assert by_index[1] == FLEX and by_index[4] == FLEX
+        assert [by_index[i] for i in (0, 2, 3, 5, 6, 7)] == [FLEX, FLEX, FLEX, ANNUAL, FLEX, FLEX]
+
+    def test_increasing_a_flexible_domain_up_to_10_is_allowed_but_not_past_it(self, mix_on, client):
         reseller = _reseller()
         get_provisioning_intake().accept(reseller, _request("grow.test", seats=3))
         assert job_executor.wait_until_idle(30)
         service = get_domain_service()
-        assert asyncio.run(service.change_licences("grow.test", get_reseller_repo().get_by_id("RSL-M1"), 5))["licences"] == 5
+        assert asyncio.run(service.change_licences("grow.test", get_reseller_repo().get_by_id("RSL-M1"), 10))["licences"] == 10
         with pytest.raises(DomainActionError) as exc:
-            asyncio.run(service.change_licences("grow.test", get_reseller_repo().get_by_id("RSL-M1"), 6))
+            asyncio.run(service.change_licences("grow.test", get_reseller_repo().get_by_id("RSL-M1"), 11))
         assert exc.value.status_code == 400
+
+    def test_increasing_an_annual_domain_past_5_is_refused(self, mix_on, client):
+        reseller = _reseller()
+        intake = get_provisioning_intake()
+        [intake.accept(reseller, _request(f"ann{i}.test", seats=2)) for i in range(4)]
+        assert job_executor.wait_until_idle(60)
+        service = get_domain_service()
+        with pytest.raises(DomainActionError) as exc:
+            asyncio.run(service.change_licences("ann3.test", get_reseller_repo().get_by_id("RSL-M1"), 6))
+        assert exc.value.status_code == 400 and "ANNUAL_MONTHLY_PAY" in exc.value.detail["detail"]
 
 
 class TestEndToEnd:

@@ -50,7 +50,8 @@ class Settings(BaseSettings):
     # because it creates real paid subscriptions.
     plan_mix_enabled: bool = False
     plan_mix_annual_every: int = 4       # 4 -> 25% of domains on the commitment plan
-    plan_mix_max_licences: int = 5       # licence cap per domain while the mix is enabled
+    plan_mix_max_licences: int = 5       # licence cap per COMMITMENT (annual) domain while the mix is enabled
+    plan_mix_flexible_max_licences: int = 10   # licence cap per FLEXIBLE domain while the mix is enabled
 
     # --- Cloud Tasks (used when job_backend == "cloudtasks") ---
     cloud_tasks_location: str = "us-central1"
