@@ -319,6 +319,8 @@ async def get_provision_status(job_id: str):
         users_created=job.users_created,
         users_failed=job.users_failed,
         users_existing=job.users_existing,
+        admin_created=job.admin_created,
+        admin_failure_reason=job.admin_failure_reason,
         steps=step_responses,
         employees=employees_response,
         email_status=job.email_status,

@@ -20,9 +20,9 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Dict, Optional
 
-from app.core.google_retry import call_with_retry
+from app.core.google_retry import call_with_network_retry, call_with_retry
 
 from app.core.exceptions import (
     CustomerAlreadyExistsError,
@@ -235,10 +235,17 @@ class ProvisioningService:
             users_created = 0
             users_failed = 0
             users_existing = 0
+            # Whether the admin really exists with admin rights. The job still finishes as
+            # COMPLETED either way (the customer and subscription do exist, and clients depend
+            # on that status), so this is what tells a client, and the ops list, that the admin
+            # account still needs attention.
+            admin_created = False
+            admin_failure_reason: Optional[str] = None
 
             try:
                 # Enterprise flow: only create 1 admin account
                 admin_employee = request.admin_as_employee
+                admin_failure: Dict[str, str] = {}
                 admin_result = await self._provision_single_user(
                     company_id,
                     request.primary_domain,
@@ -246,17 +253,22 @@ class ProvisioningService:
                     set(),
                     is_admin=True,
                     email=request.admin_email,
+                    failure=admin_failure,
                 )
 
                 users_created = 1 if admin_result == EmployeeStatus.PROVISIONED else 0
                 users_failed = 1 if admin_result == EmployeeStatus.FAILED else 0
                 users_existing = 1 if admin_result == EmployeeStatus.EXISTING else 0
+                admin_created = admin_result in (EmployeeStatus.PROVISIONED, EmployeeStatus.EXISTING)
+                if not admin_created:
+                    admin_failure_reason = admin_failure.get("reason") or "admin user was not created"
 
                 await self._complete_step(
                     step_id,
                     f"Admin: {request.admin_email} | Status: {admin_result.value}",
                 )
             except Exception as user_exc:
+                admin_failure_reason = str(user_exc)
                 logger.warning(
                     "admin_user_creation_skipped",
                     job_id=job_id,
@@ -273,7 +285,17 @@ class ProvisioningService:
                 users_created=users_created,
                 users_failed=users_failed,
                 users_existing=users_existing,
+                admin_created=admin_created,
+                admin_failure_reason=(admin_failure_reason or "")[:500] or None,
             )
+            if not admin_created:
+                logger.error(
+                    "admin_needs_attention",
+                    job_id=job_id,
+                    domain=request.primary_domain,
+                    admin_email=request.admin_email,
+                    reason=(admin_failure_reason or "")[:300],
+                )
 
             # --- Step 5: Send confirmation emails (best-effort) ---
             await self._update_job(job_id, JobStatus.EMAIL_SENDING)
@@ -594,8 +616,10 @@ class ProvisioningService:
         existing_emails: set[str],
         is_admin: bool = False,
         email: Optional[str] = None,
+        failure: Optional[Dict[str, str]] = None,
     ) -> EmployeeStatus:
-        """Provision a single user with retry logic."""
+        """Provision a single user with retry logic. When it returns FAILED, the reason is
+        written to failure["reason"] (if a dict is passed) so the caller can record it."""
         corporate_email = email or generate_corporate_email(
             employee.first_name, employee.last_name, domain, existing_emails
         )
@@ -610,8 +634,14 @@ class ProvisioningService:
             return EmployeeStatus.EXISTING
 
         # Check if user exists in directory
-        existing_user = await self._directory.get_user_safe(corporate_email)
+        # Retried like every other Google call: this is the first Directory call of the job, so it
+        # is the one that meets a connection Google closed while it sat idle ("Broken pipe").
+        existing_user = await self._retry_operation(self._directory.get_user_safe, corporate_email)
         if existing_user:
+            # The user is already there (for example an earlier attempt created it and then
+            # failed to grant admin). Make sure the admin really is an admin before calling it done.
+            if is_admin and not existing_user.is_admin:
+                await self._make_admin(corporate_email)
             # User exists in directory — save locally as EXISTING
             employee_id = f"EMP-{uuid.uuid4().hex[:8].upper()}"
             self._employee_repo.create(
@@ -692,6 +722,8 @@ class ProvisioningService:
                 email=corporate_email,
                 error=str(exc),
             )
+            if failure is not None:
+                failure["reason"] = str(exc)
             # Save as failed
             employee_id = f"EMP-{uuid.uuid4().hex[:8].upper()}"
             self._employee_repo.create(
@@ -796,8 +828,8 @@ class ProvisioningService:
 
         for recipient in recipients:
             try:
-                result = await self._email.send_confirmation_email(
-                    recipient, subject, body
+                result = await call_with_network_retry(
+                    self._email.send_confirmation_email, recipient, subject, body
                 )
                 email_statuses.append(result.get("status", "UNKNOWN"))
 
@@ -882,6 +914,116 @@ class ProvisioningService:
     # ------------------------------------------------------------------
     # Retry logic
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Admin repair: behind the "Fix admin" button on the admin dashboard
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def job_admin_email(job) -> str:
+        """The admin login this job was asked to create (same rule the job itself used)."""
+        return ProvisioningRequest(**job.request_payload).admin_email
+
+    async def check_admin(self, job, with_subscription: bool = True) -> Dict[str, Any]:
+        """Read-only: what Google has right now for this domain's admin and subscription.
+        with_subscription=False skips the Reseller call (it shares a per-minute quota with live
+        provisioning), for the quick re-check done right after a fix."""
+        email = self.job_admin_email(job)
+        user = await self._retry_operation(self._directory.get_user_safe, email)
+        out: Dict[str, Any] = {
+            "admin_email": email,
+            "user_exists": user is not None,
+            "is_admin": bool(user and user.is_admin),
+            "suspended": bool(user and user.suspended),
+            "subscription_status": None,
+        }
+        if with_subscription and job.google_customer_id:
+            try:
+                subs = await self._retry_operation(self._reseller.list_subscriptions, job.google_customer_id)
+                out["subscription_status"] = subs[0].status if subs else None
+            except Exception as exc:
+                out["subscription_status"] = f"unknown ({str(exc)[:80]})"
+        return out
+
+    async def repair_admin(self, job) -> Dict[str, Any]:
+        """Make this job's admin user exist AND be an admin, whatever state it was left in.
+
+        Looks at Google first, so it is safe to run twice and it does only the missing step:
+        no user -> create it (the standard static temporary password) then make admin;
+        user but not admin -> make admin; already admin -> nothing. The result is read back from
+        Google before the job is marked fixed. The job's status is not changed (it stays
+        COMPLETED); only the admin_* fields are. Never touches an existing user's password.
+        """
+        email = self.job_admin_email(job)
+        request = ProvisioningRequest(**job.request_payload)
+        outcome = "ALREADY_ADMIN"
+        password = generate_temporary_password()
+        try:
+            user = await self._retry_operation(self._directory.get_user_safe, email)
+            google_user_id = user.id if user else None
+            if user is None:
+                created = await self._retry_operation(
+                    self._directory.create_user,
+                    GoogleCreateUserRequest(
+                        primaryEmail=email,
+                        name=GoogleUserName(givenName=request.admin_first_name,
+                                            familyName=request.admin_last_name),
+                        password=password,
+                        changePasswordAtNextLogin=True,
+                        suspended=False,
+                    ),
+                )
+                google_user_id = created.id
+                outcome = "CREATED_AND_ADMIN"
+            if user is None or not user.is_admin:
+                await self._make_admin(email)
+                if outcome != "CREATED_AND_ADMIN":
+                    outcome = "MADE_ADMIN"
+                confirmed = await self._retry_operation(self._directory.get_user_safe, email)
+                if not confirmed or not confirmed.is_admin:
+                    raise RuntimeError("Google accepted makeAdmin but the user is still not an admin")
+        except Exception as exc:
+            self._job_repo.update_fields(
+                job.job_id,
+                admin_failure_reason=str(exc)[:500],
+                admin_repair_attempts=(job.admin_repair_attempts or 0) + 1,
+                admin_last_repair_at=datetime.now(timezone.utc).isoformat(),
+            )
+            logger.error("admin_repair_failed", job_id=job.job_id, domain=job.primary_domain,
+                         admin_email=email, error=str(exc)[:300])
+            raise
+
+        company = self._company_repo.get_by_domain(job.primary_domain)
+        if company and not any(
+            e.temporary_password for e in self._employee_repo.get_by_company_id(company.company_id)
+            if e.corporate_email.lower() == email.lower()
+        ):
+            self._employee_repo.create(
+                EmployeeDocument(
+                    employee_id=f"EMP-{uuid.uuid4().hex[:8].upper()}",
+                    company_id=company.company_id,
+                    first_name=request.admin_first_name,
+                    last_name=request.admin_last_name,
+                    personal_email=request.admin_recovery_email,
+                    corporate_email=email,
+                    google_user_id=google_user_id,
+                    status=EmployeeStatus.PROVISIONED.value,
+                    password_hash=hash_password(password),
+                    temporary_password=password,
+                )
+            )
+        self._job_repo.update_fields(
+            job.job_id,
+            admin_created=True,
+            admin_failure_reason=None,
+            users_created=1,
+            users_failed=0,
+            admin_repair_attempts=(job.admin_repair_attempts or 0) + 1,
+            admin_last_repair_at=datetime.now(timezone.utc).isoformat(),
+        )
+        logger.info("admin_repaired", job_id=job.job_id, domain=job.primary_domain,
+                    admin_email=email, outcome=outcome)
+        return {"outcome": outcome, "admin_email": email, "temporary_password": password}
 
     async def _make_admin(self, email: str) -> None:
         """Grant super-admin to a user created moments ago. Google can briefly answer

@@ -73,6 +73,34 @@ class JobRepository:
         results = self._store.query(self.JOBS_COLLECTION, "settled", "==", False)
         return [ProvisioningJobDocument(**r) for r in results]
 
+    @staticmethod
+    def is_admin_failure(job: ProvisioningJobDocument) -> bool:
+        """True when the domain and subscription exist but the admin user is missing or is not
+        an admin. Jobs that finished before admin_created existed (it is None) count when they
+        completed with no admin user at all, so older failures show up without any migration."""
+        if job.admin_created is False:
+            return True
+        return (
+            job.admin_created is None
+            and job.status == "COMPLETED"
+            and job.users_created == 0
+            and job.users_existing == 0
+            and bool(job.request_payload)
+        )
+
+    def list_admin_failures(self) -> List[ProvisioningJobDocument]:
+        """Every job that is an admin failure (see is_admin_failure), newest first.
+        Two single-field equality queries, so no composite index and no full scan: jobs flagged
+        admin_created == False, and jobs with users_created == 0 (which is where the older,
+        unflagged failures are)."""
+        found = {}
+        for field, value in (("admin_created", False), ("users_created", 0)):
+            for row in self._store.query(self.JOBS_COLLECTION, field, "==", value):
+                job = ProvisioningJobDocument(**row)
+                if self.is_admin_failure(job):
+                    found[job.job_id] = job
+        return sorted(found.values(), key=lambda j: j.created_at, reverse=True)
+
     # --- Lease: exactly one worker runs a job at a time; a crashed worker's lease expires ---
 
     def claim(self, job_id: str, owner: str, lease_seconds: int) -> str:

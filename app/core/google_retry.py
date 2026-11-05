@@ -83,6 +83,33 @@ def retry_delay(exc: BaseException, attempt: int) -> float:
     return base * random.uniform(0.8, 1.2)
 
 
+NETWORK_ONLY_ATTEMPTS = 3
+
+
+async def call_with_network_retry(operation: Callable[..., Awaitable[T]], *args, **kwargs) -> T:
+    """Like call_with_retry, but retries only dropped connections / timeouts (a stale
+    keep-alive connection answers "Broken pipe" and works on a fresh one) and never waits on a
+    rate limit. For best-effort calls such as the welcome email: a Gmail quota error will not
+    clear by retrying within the job, so it must fail fast instead of holding the job."""
+    for attempt in range(NETWORK_ONLY_ATTEMPTS):
+        try:
+            return await operation(*args, **kwargs)
+        except Exception as exc:
+            if not is_network_error(exc) or attempt == NETWORK_ONLY_ATTEMPTS - 1:
+                raise
+            delay = retry_delay(exc, attempt)
+            logger.warning(
+                "google_call_retry",
+                operation=getattr(operation, "__name__", str(operation)),
+                attempt=attempt + 1,
+                delay_seconds=round(delay, 1),
+                rate_limited=False,
+                error=str(exc)[:200],
+            )
+            await asyncio.sleep(delay)
+    raise RuntimeError("unreachable")
+
+
 async def call_with_retry(operation: Callable[..., Awaitable[T]], *args, **kwargs) -> T:
     """Await operation(*args, **kwargs), retrying temporary failures with backoff."""
     for attempt in range(MAX_ATTEMPTS):

@@ -55,6 +55,8 @@ class ProvisioningStatusResponse(BaseModel):
     users_created: int = 0
     users_failed: int = 0
     users_existing: int = 0
+    admin_created: Optional[bool] = None
+    admin_failure_reason: Optional[str] = None
     steps: List[ProvisioningStepResponse] = Field(default_factory=list)
     employees: List[EmployeeStatusResponse] = Field(default_factory=list)
     email_status: Optional[str] = None
