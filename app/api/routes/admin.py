@@ -15,6 +15,8 @@ GET    /api/v1/admin/dashboard/summary                 — Global stats
 
 from __future__ import annotations
 
+import asyncio
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -501,6 +503,210 @@ def licence_usage_report(
         get_job_repo().list_all_jobs(), AuditRepository(get_store()).list_all(),
         days=days, reseller_id=reseller_id,
     )
+
+
+def _reason_kind(reason: Optional[str]) -> str:
+    text = (reason or "").lower()
+    if "broken pipe" in text or "connection" in text or "timed out" in text:
+        return "dropped_connection"
+    if "403" in text or "not authorized" in text:
+        return "google_403"
+    return "other"
+
+
+def _category(kind: str, attempts: int) -> str:
+    """Where the dashboard puts a domain.
+    fixable - the failure was on our side (dropped connection etc.): the Fix button should work.
+    try     - Google refused (403) and nobody has tried since: worth one click, may need manual.
+    manual  - Google refused again after a Fix attempt: fix it by hand in the Google Admin console."""
+    if kind == "google_403":
+        return "manual" if attempts >= 1 else "try"
+    return "fixable"
+
+
+_legacy_reason_cache: dict = {}
+
+
+def _legacy_reason(job) -> str:
+    """Why an older job (finished before failures were recorded) has no admin, worked out from what
+    the old flow stored: no employee row for the admin = it stopped before creating anything (a
+    dropped connection); only a FAILED row = creating the user was refused; a PROVISIONED row = the
+    user was created and then making it admin was refused. Immutable for an old job, so cached."""
+    cached = _legacy_reason_cache.get(job.job_id)
+    if cached:
+        return cached
+    from app.dependencies import get_company_repo, get_employee_repo
+    from app.services.provisioning_service import ProvisioningService
+
+    try:
+        email = ProvisioningService.job_admin_email(job).lower()
+        company = get_company_repo().get_by_domain(job.primary_domain)
+        rows = [e for e in get_employee_repo().get_by_company_id(company.company_id)
+                if e.corporate_email.lower() == email] if company else []
+    except Exception:
+        return "Admin was not created (older job, reason not recorded)"
+    statuses = {e.status for e in rows}
+    if "PROVISIONED" in statuses:
+        reason = "Google refused making the user an admin (403) - older job"
+    elif "FAILED" in statuses:
+        reason = "Google refused creating the user (403) - older job"
+    else:
+        reason = "Dropped connection before the admin step (Broken pipe) - older job"
+    _legacy_reason_cache[job.job_id] = reason
+    return reason
+
+
+def _admin_failure_row(j, reason: Optional[str] = None) -> dict:
+    from app.services.provisioning_service import ProvisioningService
+
+    try:
+        admin_email = ProvisioningService.job_admin_email(j)
+    except Exception:
+        admin_email = None
+    reason = reason or j.admin_failure_reason or ""
+    attempts = j.admin_repair_attempts or 0
+    kind = _reason_kind(reason)
+    return {
+        "created_at": j.created_at.isoformat() if j.created_at else None,
+        "domain": j.primary_domain,
+        "company_name": j.company_name,
+        "job_id": j.job_id,
+        "reseller_id": j.reseller_id,
+        "google_customer_id": j.google_customer_id,
+        "status": j.status,
+        "admin_email": admin_email,
+        "reason": reason,
+        "reason_kind": kind,
+        "category": _category(kind, attempts),
+        "legacy": j.admin_created is None,
+        "repair_attempts": attempts,
+        "last_repair_at": j.admin_last_repair_at.isoformat() if j.admin_last_repair_at else None,
+    }
+
+
+def _failure_rows(jobs) -> list:
+    """Rows for the list. The reason of an older (unflagged) job is worked out in parallel the
+    first time and then served from the cache."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    old = [j for j in jobs if j.admin_created is None and not j.admin_failure_reason]
+    reasons = {}
+    if old:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for job, reason in zip(old, pool.map(_legacy_reason, old)):
+                reasons[job.job_id] = reason
+    return [_admin_failure_row(j, reasons.get(j.job_id)) for j in jobs]
+
+
+_repairs_running: set = set()
+_repairs_lock = threading.Lock()
+
+
+def _failed_admin_job(job_id: str):
+    """The job, if it is on the failure list; 404 / 409 otherwise."""
+    from app.dependencies import get_job_repo
+    from app.repositories.job_repository import JobRepository
+
+    job = get_job_repo().get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not JobRepository.is_admin_failure(job):
+        raise HTTPException(status_code=409, detail="This domain is not on the failed-admin list")
+    if not job.request_payload:
+        raise HTTPException(status_code=422, detail="The original request is not stored for this job")
+    return job
+
+
+def _audit_admin_action(job, action: str, status: str, by: str, **details) -> None:
+    AuditRepository(get_store()).create(
+        AuditLogDocument(
+            log_id=f"LOG-{uuid.uuid4().hex[:8].upper()}",
+            reseller_id=job.reseller_id or "",
+            action=action,
+            resource_type="job",
+            resource_id=job.job_id,
+            status=status,
+            details={"by": by, "domain": job.primary_domain, **details},
+        )
+    )
+
+
+@router.post("/admin-failures/{job_id}/fix", summary="Create the admin user / make it admin for one domain")
+def fix_admin(job_id: str, admin=Depends(require_admin)) -> dict:
+    """The dashboard's "Fix admin" button. Safe to repeat: it looks at Google first and does only
+    the missing step (create user, make admin), then confirms the result."""
+    from app.dependencies import get_provisioning_service
+
+    by = admin.get("email", "") if isinstance(admin, dict) else str(admin)
+    job = _failed_admin_job(job_id)
+    with _repairs_lock:
+        if job_id in _repairs_running:
+            raise HTTPException(status_code=409, detail="This domain is already being fixed")
+        _repairs_running.add(job_id)
+    try:
+        result = asyncio.run(get_provisioning_service().repair_admin(job))
+    except Exception as exc:
+        _audit_admin_action(job, "ADMIN_REPAIR", "FAILED", by, error=str(exc)[:300])
+        return {"fixed": False, "job_id": job_id, "domain": job.primary_domain,
+                "reason": str(exc)[:500], "reason_kind": _reason_kind(str(exc))}
+    finally:
+        with _repairs_lock:
+            _repairs_running.discard(job_id)
+    _audit_admin_action(job, "ADMIN_REPAIR", "SUCCESS", by, outcome=result["outcome"])
+    return {"fixed": True, "job_id": job_id, "domain": job.primary_domain, **result}
+
+
+@router.get("/admin-failures/{job_id}/check", summary="Look at the domain's admin in Google (read-only)")
+def check_admin(job_id: str, subscription: bool = Query(True), admin=Depends(require_admin)) -> dict:
+    from app.dependencies import get_provisioning_service
+
+    job = _failed_admin_job(job_id)
+    try:
+        state = asyncio.run(get_provisioning_service().check_admin(job, with_subscription=subscription))
+    except Exception as exc:
+        return {"job_id": job_id, "domain": job.primary_domain, "error": str(exc)[:300]}
+    return {"job_id": job_id, "domain": job.primary_domain, **state}
+
+
+@router.post("/admin-failures/{job_id}/mark-handled", summary="Take a domain off the list (fixed by hand)")
+def mark_admin_handled(job_id: str, admin=Depends(require_admin)) -> dict:
+    from app.dependencies import get_job_repo
+
+    by = admin.get("email", "") if isinstance(admin, dict) else str(admin)
+    job = _failed_admin_job(job_id)
+    get_job_repo().update_fields(
+        job_id, admin_created=True, admin_failure_reason=f"Fixed manually (marked by {by})")
+    _audit_admin_action(job, "ADMIN_MARKED_HANDLED", "SUCCESS", by)
+    return {"job_id": job_id, "domain": job.primary_domain, "handled": True}
+
+
+@router.get("/admin-failures", summary="Domains created without a working admin user (read-only)")
+def admin_failures(
+    reseller_id: Optional[str] = Query(None),
+    format: str = Query("json", pattern="^(json|csv)$"),
+    admin=Depends(require_admin),
+):
+    """Jobs that finished (domain + subscription exist) but whose admin user could not be
+    created or made admin, so someone has to finish them by hand. Newest first."""
+    import csv
+    import io
+
+    from fastapi.responses import Response
+
+    from app.dependencies import get_job_repo
+
+    jobs = get_job_repo().list_admin_failures()
+    if reseller_id:
+        jobs = [j for j in jobs if j.reseller_id == reseller_id]
+    rows = _failure_rows(jobs)
+    if format == "csv":
+        out = io.StringIO()
+        writer = csv.DictWriter(out, fieldnames=list(rows[0].keys()) if rows else ["domain"])
+        writer.writeheader()
+        writer.writerows(rows)
+        return Response(out.getvalue(), media_type="text/csv",
+                        headers={"Content-Disposition": 'attachment; filename="admin_failures.csv"'})
+    return {"count": len(rows), "domains": rows}
 
 
 # ---------------------------------------------------------------------------

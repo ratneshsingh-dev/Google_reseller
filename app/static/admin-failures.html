@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Failed Admins | Channel Partner Admin</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    .wrap { max-width: 1250px; margin: 0 auto; padding: 1.5rem 1rem 3rem; font-family: 'Outfit', sans-serif; color: var(--text-primary, #e8eaf6); }
+    .top { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: .75rem; margin-bottom: 1rem; }
+    .top h1 { font-size: 1.35rem; margin: 0; }
+    .controls { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+    .controls select, .controls input, .controls a, .controls button, .rowbtn { padding: .4rem .7rem; border-radius: 8px; border: 1px solid rgba(255,255,255,.15); background: rgba(255,255,255,.06); color: inherit; font: inherit; font-size: .85rem; text-decoration: none; cursor: pointer; }
+    .controls select option { color: #111; }
+    .primary { background: #6366f1 !important; border-color: #6366f1 !important; font-weight: 600; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .tabs { display: flex; gap: .5rem; flex-wrap: wrap; margin: 0 0 1rem; }
+    .tab { flex: 1 1 200px; text-align: left; border: 1px solid rgba(255,255,255,.14); border-radius: 12px; padding: .7rem 1rem; background: rgba(255,255,255,.04); color: inherit; font: inherit; cursor: pointer; }
+    .tab.active { outline: 2px solid #6366f1; background: rgba(99,102,241,.12); }
+    .tab .n { font-size: 1.55rem; font-weight: 700; display: block; }
+    .tab .l { font-size: .8rem; font-weight: 600; }
+    .tab .d { font-size: .72rem; opacity: .65; display: block; margin-top: .15rem; }
+    .tablewrap { overflow-x: auto; border: 1px solid rgba(255,255,255,.12); border-radius: 12px; }
+    table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+    th, td { padding: .55rem .7rem; text-align: left; border-bottom: 1px solid rgba(255,255,255,.08); vertical-align: top; }
+    th { font-size: .72rem; text-transform: uppercase; letter-spacing: .04em; opacity: .7; white-space: nowrap; }
+    tr.row-ok td { background: rgba(52,211,153,.10); }
+    tr.row-bad td { background: rgba(248,113,113,.08); }
+    .mono { font-family: 'Roboto Mono', monospace; font-size: .8rem; }
+    .reason { max-width: 300px; opacity: .85; word-break: break-word; }
+    .chip { display: inline-block; padding: .1rem .55rem; border-radius: 999px; font-size: .72rem; border: 1px solid rgba(255,255,255,.2); white-space: nowrap; }
+    .chip.fixable { color: #34d399; border-color: rgba(52,211,153,.5); }
+    .chip.try { color: #fbbf24; border-color: rgba(251,191,36,.5); }
+    .chip.manual { color: #f87171; border-color: rgba(248,113,113,.5); }
+    .ok { color: #34d399; } .bad { color: #f87171; }
+    .rowbtn { margin: 0 .2rem .2rem 0; font-size: .78rem; padding: .25rem .55rem; }
+    .result { margin-top: .35rem; font-size: .78rem; }
+    #msg, .note { opacity: .75; font-size: .85rem; margin: .75rem 0; }
+    #progress { display: none; margin: .5rem 0 1rem; font-size: .9rem; }
+  </style>
+</head>
+
+<body>
+  <div class="wrap">
+    <div class="top">
+      <h1>⚠️ Failed Admins — domains created without a working admin</h1>
+      <div class="controls">
+        <a href="/static/reseller-admin.html">← Admin Panel</a>
+        <a id="csv" href="#">⬇ CSV</a>
+        <button id="refresh">↻ Refresh</button>
+      </div>
+    </div>
+
+    <div id="msg">Loading…</div>
+
+    <div id="content" style="display:none">
+      <div class="tabs" id="tabs"></div>
+      <div class="controls" style="margin-bottom:.75rem">
+        <input id="search" placeholder="Search domain / email…" style="min-width:220px">
+        <select id="partner"><option value="">All partners</option></select>
+        <button id="selready">☑ Select all ready to fix</button>
+        <button id="fixsel" class="primary">🔧 Fix selected</button>
+        <button id="stop" style="display:none">⏹ Stop</button>
+      </div>
+      <div id="progress"></div>
+      <div class="tablewrap"><table>
+        <thead><tr>
+          <th><input type="checkbox" id="all"></th><th>Time (IST)</th><th>Domain</th><th>Admin email</th><th>Group</th><th>Reason</th><th>Tries</th><th>Actions</th>
+        </tr></thead>
+        <tbody id="rows"></tbody>
+      </table></div>
+      <p class="note">
+        <b>Ready to fix</b>: the failure was on our side (a dropped connection), so <b>Fix admin</b> should work.
+        <b>Try first</b>: Google refused (403). One click is worth a try, but it may need a manual fix.
+        <b>Needs manual fix</b>: Google refused again after a try. Do it by hand: Partner Sales Console → customer → Manage users → assign Super Admin, then click <b>Mark handled</b>.<br>
+        A row turns <b class="ok">green</b> only after Google confirms the user is an admin; if anything is unclear it stays red and on the list.
+        <b>Fix admin</b> is safe to click twice. New admins get the standard temporary password and must change it at first login.
+      </p>
+    </div>
+  </div>
+
+  <script>
+    const API = '/api/v1/admin';
+    const $ = id => document.getElementById(id);
+    const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const GROUPS = {
+      fixable: { label: '✅ Ready to fix', desc: 'Our dropped connection: Fix should work', chip: 'ready to fix' },
+      try:     { label: '⚠️ Try first', desc: 'Google refused (403): may need manual', chip: 'try first' },
+      manual:  { label: '🛠 Needs manual fix', desc: 'Google refused again: fix in Google Admin', chip: 'manual' },
+    };
+    let rows = [], selected = new Set(), results = {}, stopFlag = false, running = false, cat = '';
+
+    async function call(path, method) {
+      const res = await fetch(API + path, { method: method || 'GET', credentials: 'include' });
+      if (res.status === 401 || res.status === 403) throw new Error('auth');
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.detail || ('HTTP ' + res.status));
+      return body;
+    }
+    const ist = iso => iso ? new Date(iso).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false }) : '';
+
+    const open = () => rows.filter(r => !r.fixed);
+    function visible() {
+      const q = $('search').value.trim().toLowerCase(), p = $('partner').value;
+      return rows.filter(r => (r.fixed || !cat || r.category === cat) && (!p || r.reseller_id === p) &&
+        (!q || (r.domain || '').toLowerCase().includes(q) || (r.admin_email || '').toLowerCase().includes(q) || (r.job_id || '').toLowerCase().includes(q)));
+    }
+
+    function render() {
+      const o = open(), count = k => o.filter(r => r.category === k).length;
+      $('tabs').innerHTML =
+        `<button class="tab ${cat === '' ? 'active' : ''}" data-cat=""><span class="n">${o.length}</span><span class="l">All that need a fix</span><span class="d">${rows.length - o.length} fixed just now</span></button>` +
+        Object.keys(GROUPS).map(k => `<button class="tab ${cat === k ? 'active' : ''}" data-cat="${k}"><span class="n">${count(k)}</span><span class="l">${GROUPS[k].label}</span><span class="d">${GROUPS[k].desc}</span></button>`).join('');
+      const vis = visible();
+      $('rows').innerHTML = vis.length ? vis.map(r => {
+        const res = results[r.job_id], g = GROUPS[r.category] || GROUPS.try;
+        const rowCls = r.fixed ? 'row-ok' : (res && res.cls === 'bad' ? 'row-bad' : '');
+        return `<tr data-job="${esc(r.job_id)}" class="${rowCls}">
+          <td>${r.fixed ? '✔' : `<input type="checkbox" class="sel" ${selected.has(r.job_id) ? 'checked' : ''}>`}</td>
+          <td>${esc(ist(r.created_at))}</td>
+          <td><b>${esc(r.domain)}</b><div class="mono" style="opacity:.6">${esc(r.job_id)}</div></td>
+          <td class="mono">${esc(r.admin_email || '—')}</td>
+          <td>${r.fixed ? '<span class="chip fixable">fixed</span>' : `<span class="chip ${esc(r.category)}">${esc(g.chip)}</span>`}</td>
+          <td class="reason">${esc((r.reason || '').slice(0, 220))}</td>
+          <td>${esc(r.repair_attempts)}</td>
+          <td>
+            ${r.fixed ? '' : `<button class="rowbtn primary" data-act="fix">🔧 Fix admin</button>
+            <button class="rowbtn" data-act="check">🔍 Check</button>
+            <button class="rowbtn" data-act="handled">✔ Mark handled</button>`}
+            <div class="result ${res ? res.cls : ''}">${res ? res.html : ''}</div>
+          </td></tr>`;
+      }).join('') : '<tr><td colspan="8" style="text-align:center;opacity:.6;padding:1.5rem">Nothing here 🎉</td></tr>';
+      const pending = vis.filter(r => !r.fixed);
+      $('all').checked = pending.length > 0 && pending.every(r => selected.has(r.job_id));
+    }
+
+    async function load() {
+      $('msg').style.display = 'block'; $('msg').textContent = 'Loading…';
+      try {
+        const d = await call('/admin-failures');
+        rows = d.domains;
+        const partners = [...new Set(rows.map(r => r.reseller_id).filter(Boolean))].sort();
+        const cur = $('partner').value;
+        $('partner').innerHTML = '<option value="">All partners</option>' + partners.map(p => `<option ${p === cur ? 'selected' : ''}>${esc(p)}</option>`).join('');
+        selected = new Set([...selected].filter(id => rows.some(r => r.job_id === id)));
+        $('msg').style.display = 'none'; $('content').style.display = 'block';
+        render();
+      } catch (e) {
+        $('content').style.display = 'none';
+        $('msg').innerHTML = e.message === 'auth'
+          ? 'Please sign in on the <a href="/static/reseller-admin.html">admin panel</a> first, then reopen this page.'
+          : 'Could not load the list (' + esc(e.message) + '). Try again.';
+      }
+    }
+
+    const fixedList = [];
+
+    // Green only when Google confirms: the server reads the user back after fixing, and this page
+    // asks Google once more (read-only) before it shows success.
+    async function fixOne(id) {
+      results[id] = { cls: '', html: 'Fixing…' }; render();
+      const row = rows.find(x => x.job_id === id);
+      try {
+        const r = await call(`/admin-failures/${encodeURIComponent(id)}/fix`, 'POST');
+        if (r.fixed) {
+          const c = await call(`/admin-failures/${encodeURIComponent(id)}/check?subscription=false`);
+          if (c.is_admin === true) {
+            results[id] = { cls: 'ok', html: `✔ Admin confirmed in Google (${esc((r.outcome || '').replace(/_/g, ' ').toLowerCase())}).<br>Login: <span class="mono">${esc(r.admin_email)}</span> · Password: <span class="mono">${esc(r.temporary_password)}</span> (change at first login)` };
+            if (row) row.fixed = true;
+            selected.delete(id); fixedList.unshift(id);
+          } else {
+            results[id] = { cls: 'bad', html: '✖ Not confirmed: Google did not show this user as an admin on the re-check. Not marked as fixed — click Check, or fix by hand.' };
+          }
+        } else {
+          results[id] = { cls: 'bad', html: '✖ Not fixed. Google said: ' + esc(r.reason) + (r.reason_kind === 'google_403' ? '<br>Fix this one by hand in the Google Admin console.' : '<br>You can try again.') };
+          if (row) { row.repair_attempts++; row.reason = r.reason; row.reason_kind = r.reason_kind; if (r.reason_kind === 'google_403') row.category = 'manual'; }
+        }
+      } catch (e) { results[id] = { cls: 'bad', html: '✖ ' + esc(e.message) }; }
+      render();
+    }
+
+    async function checkOne(id) {
+      results[id] = { cls: '', html: 'Checking Google…' }; render();
+      try {
+        const r = await call(`/admin-failures/${encodeURIComponent(id)}/check`);
+        results[id] = r.error ? { cls: 'bad', html: '✖ ' + esc(r.error) } : { cls: '', html:
+          `User exists: <b>${r.user_exists ? 'yes' : 'no'}</b> · Admin: <b>${r.is_admin ? 'yes' : 'no'}</b> · Suspended: <b>${r.suspended ? 'yes' : 'no'}</b> · Subscription: <b>${esc(r.subscription_status || 'unknown')}</b>` };
+      } catch (e) { results[id] = { cls: 'bad', html: '✖ ' + esc(e.message) }; }
+      render();
+    }
+
+    async function handled(id) {
+      const r = rows.find(x => x.job_id === id);
+      if (!confirm(`Remove ${r ? r.domain : id} from the list? Only do this if you already made its admin by hand.`)) return;
+      try { await call(`/admin-failures/${encodeURIComponent(id)}/mark-handled`, 'POST'); rows = rows.filter(x => x.job_id !== id); selected.delete(id); render(); }
+      catch (e) { results[id] = { cls: 'bad', html: '✖ ' + esc(e.message) }; render(); }
+    }
+
+    async function fixSelected() {
+      const ids = visible().filter(r => !r.fixed && selected.has(r.job_id)).map(r => r.job_id);
+      if (!ids.length) { alert('Tick the domains you want to fix first (or use "Select all ready to fix").'); return; }
+      if (!confirm(`Fix the admin for ${ids.length} domain(s)? They are processed one at a time.`)) return;
+      running = true; stopFlag = false; $('fixsel').disabled = true; $('selready').disabled = true; $('stop').style.display = ''; $('progress').style.display = 'block';
+      let done = 0;
+      const before = fixedList.length;
+      for (const id of ids) {
+        if (stopFlag) break;
+        $('progress').textContent = `Fixing ${done + 1} of ${ids.length}…`;
+        await fixOne(id); done++;
+        await new Promise(r => setTimeout(r, 1500));
+      }
+      const ok = fixedList.length - before;
+      $('progress').textContent = `${stopFlag ? 'Stopped' : 'Finished'}: ${ok} fixed and confirmed, ${done - ok} not fixed, ${ids.length - done} not started.`;
+      running = false; $('fixsel').disabled = false; $('selready').disabled = false; $('stop').style.display = 'none';
+    }
+
+    $('rows').onclick = e => {
+      const tr = e.target.closest('tr'); if (!tr) return;
+      const id = tr.dataset.job;
+      if (e.target.classList.contains('sel')) { e.target.checked ? selected.add(id) : selected.delete(id); return; }
+      const act = e.target.dataset.act;
+      if (act === 'fix') fixOne(id); else if (act === 'check') checkOne(id); else if (act === 'handled') handled(id);
+    };
+    $('tabs').onclick = e => { const t = e.target.closest('.tab'); if (t) { cat = t.dataset.cat; render(); } };
+    $('all').onchange = e => { visible().filter(r => !r.fixed).forEach(r => e.target.checked ? selected.add(r.job_id) : selected.delete(r.job_id)); render(); };
+    $('selready').onclick = () => { open().filter(r => r.category === 'fixable').forEach(r => selected.add(r.job_id)); cat = 'fixable'; render(); };
+    ['search', 'partner'].forEach(id => { $(id).oninput = render; $(id).onchange = render; });
+    $('fixsel').onclick = fixSelected; $('stop').onclick = () => { stopFlag = true; };
+    $('refresh').onclick = () => { if (!running) load(); };
+    $('csv').href = API + '/admin-failures?format=csv';
+    load();
+  </script>
+</body>
+
+</html>

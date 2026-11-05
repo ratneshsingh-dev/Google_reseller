@@ -136,6 +136,12 @@ class ProvisioningJobDocument(BaseModel):
     users_created: int = 0
     users_failed: int = 0
     users_existing: int = 0
+    # False when the domain and subscription exist but the admin user could not be created or
+    # made admin. None on jobs from before this field existed.
+    admin_created: Optional[bool] = None
+    admin_failure_reason: Optional[str] = None
+    admin_repair_attempts: int = 0          # clicks of "Fix admin" in the admin dashboard
+    admin_last_repair_at: Optional[datetime] = None
     email_status: Optional[str] = None
     error_message: Optional[str] = None
     created_at: datetime = Field(default_factory=_utcnow)

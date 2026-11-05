@@ -404,6 +404,8 @@ def reseller_get_job_status(
         "licensed_seats": job.licensed_seats,
         "users_created": job.users_created,
         "users_failed": job.users_failed,
+        "admin_created": job.admin_created,
+        "admin_failure_reason": job.admin_failure_reason,
         "email_status": job.email_status,
         "error_message": job.error_message,
         "steps": step_responses,

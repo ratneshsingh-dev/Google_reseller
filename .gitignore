@@ -38,3 +38,6 @@ htmlcov/
 # --- OS ---
 .DS_Store
 Thumbs.db
+
+# customer domain lists exported for manual follow-up - never commit or ship
+failed_admin_domains*.csv

@@ -16,3 +16,5 @@ get_postman_token.py
 reset_admin_password.py
 verify_user.py
 e2e_test.py
+
+failed_admin_domains*.csv

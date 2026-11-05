@@ -55,6 +55,9 @@
         <a href="/static/licence-usage.html" class="btn btn-secondary" style="padding:0.35rem 0.8rem;font-size:0.8rem;">
           📈 Licence Usage
         </a>
+        <a href="/static/admin-failures.html" class="btn btn-secondary" style="padding:0.35rem 0.8rem;font-size:0.8rem;">
+          ⚠️ Failed Admins <span id="failed-admins-count" style="display:none;margin-left:.3rem;padding:0 .4rem;border-radius:999px;background:#ef4444;color:#fff;font-size:.72rem;"></span>
+        </a>
         <a href="/static/index.html" class="btn btn-secondary" style="padding:0.35rem 0.8rem;font-size:0.8rem;">
           ← Main Panel
         </a>
@@ -506,5 +509,19 @@
   <div id="toast" class="toast"></div>
 
   <script src="/static/js/reseller-admin.js"></script>
+  <script>
+    // Red count next to "Failed Admins" (best effort: stays hidden if the call fails or nobody is signed in yet).
+    (function () {
+      function refresh() {
+        fetch('/api/v1/admin/admin-failures', { credentials: 'include' })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (d) {
+            var el = document.getElementById('failed-admins-count');
+            if (el && d && d.count > 0) { el.textContent = d.count; el.style.display = 'inline-block'; }
+          }).catch(function () {});
+      }
+      setTimeout(refresh, 2500);
+    })();
+  </script>
 </body>
 </html>

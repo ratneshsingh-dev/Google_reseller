@@ -207,3 +207,136 @@ class TestActivityWrite:
         for _ in range(10):
             assert client.get("/api/v1/reseller/quota", headers=headers).status_code == 200
         assert len(writes) == 1
+
+
+class TestAdminStepIsReliableAndHonest:
+    """The admin user is the last step of a job. A dropped connection on its first Directory
+    call used to skip the whole step silently; now it is retried, and when the admin still
+    cannot be created the job says so (admin_created=False) instead of looking fully done."""
+
+    @pytest.fixture(autouse=True)
+    def instant_waits(self, monkeypatch):
+        import app.services.provisioning_service as ps
+
+        async def instant(_seconds):
+            return None
+        monkeypatch.setattr(ps.asyncio, "sleep", instant)
+
+    def _run(self, domain):
+        result = get_provisioning_intake().accept(_reseller(), _request(domain))
+        assert job_executor.wait_until_idle(30)
+        return get_job_repo().get_job(result["job_id"])
+
+    def test_dropped_connection_on_the_first_lookup_is_retried(self, client, monkeypatch):
+        from app.dependencies import get_directory_service
+        directory = get_directory_service()
+        original = directory.get_user_safe
+        state = {"n": 0}
+
+        async def flaky(email):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise BrokenPipeError(32, "Broken pipe")
+            return await original(email)
+
+        monkeypatch.setattr(directory, "get_user_safe", flaky)
+        job = self._run("pipelookup.test")
+        assert state["n"] == 2
+        assert job.status == "COMPLETED" and job.users_created == 1
+        assert job.admin_created is True and not job.admin_failure_reason
+
+    def test_a_good_job_is_marked_admin_created(self, client):
+        job = self._run("goodadmin.test")
+        assert job.admin_created is True and job.users_created == 1
+
+    def test_permanent_refusal_is_recorded_and_listed(self, client, monkeypatch):
+        from app.dependencies import get_directory_service
+        directory = get_directory_service()
+
+        async def refuse(email):
+            raise http_error(403, "forbidden")
+
+        monkeypatch.setattr(directory, "make_admin", refuse)
+        job = self._run("refused.test")
+        assert job.status == "COMPLETED"            # domain and subscription do exist
+        assert job.admin_created is False
+        assert "403" in (job.admin_failure_reason or "")
+        listed = [j.job_id for j in get_job_repo().list_admin_failures()]
+        assert job.job_id in listed
+
+    def test_good_jobs_are_not_in_the_failure_list(self, client):
+        job = self._run("notlisted.test")
+        assert job.job_id not in [j.job_id for j in get_job_repo().list_admin_failures()]
+
+    def test_existing_user_who_is_not_admin_is_made_admin(self, client):
+        """An earlier attempt created the user but failed to grant admin; running the job again
+        must finish the job instead of treating the plain user as done."""
+        from app.dependencies import get_directory_service
+        from app.models.google_api import GoogleCreateUserRequest, GoogleUserName
+        directory = get_directory_service()
+        admin_email = _request("halfdone.test").admin_email
+        asyncio.run(directory.create_user(GoogleCreateUserRequest(
+            primaryEmail=admin_email, name=GoogleUserName(givenName="Ada", familyName="Admin"),
+            password="Temp#12345678", changePasswordAtNextLogin=True, suspended=False)))
+        assert asyncio.run(directory.get_user(admin_email)).is_admin is False
+        job = self._run("halfdone.test")
+        assert asyncio.run(directory.get_user(admin_email)).is_admin is True
+        assert job.admin_created is True
+
+
+class TestEmailRetriesOnlyDroppedConnections:
+    def test_dropped_connection_is_retried(self):
+        state = {"n": 0}
+
+        async def send():
+            state["n"] += 1
+            if state["n"] < 3:
+                raise BrokenPipeError(32, "Broken pipe")
+            return "sent"
+
+        assert asyncio.run(google_retry.call_with_network_retry(send)) == "sent"
+        assert state["n"] == 3
+
+    def test_rate_limit_fails_fast_without_waiting(self):
+        state = {"n": 0}
+
+        async def send():
+            state["n"] += 1
+            raise http_error(429, "rateLimitExceeded")
+
+        with pytest.raises(HttpError):
+            asyncio.run(google_retry.call_with_network_retry(send))
+        assert state["n"] == 1
+
+
+class TestAdminFailuresEndpoint:
+    @pytest.fixture
+    def admin_client(self, client):
+        from app.core.auth_middleware import require_admin
+        from app.main import app
+        app.dependency_overrides[require_admin] = lambda: {"email": "boss@econz.test"}
+        yield client
+        app.dependency_overrides.pop(require_admin, None)
+
+    def test_requires_admin(self, client):
+        assert client.get("/api/v1/admin/admin-failures").status_code == 401
+
+    def test_lists_failed_domains_as_json_and_csv(self, admin_client, monkeypatch):
+        from app.dependencies import get_directory_service
+        directory = get_directory_service()
+
+        async def refuse(email):
+            raise http_error(403, "forbidden")
+
+        monkeypatch.setattr(directory, "make_admin", refuse)
+        import app.services.provisioning_service as ps
+
+        async def instant(_seconds):
+            return None
+        monkeypatch.setattr(ps.asyncio, "sleep", instant)
+        get_provisioning_intake().accept(_reseller(), _request("listme.test"))
+        assert job_executor.wait_until_idle(30)
+        body = admin_client.get("/api/v1/admin/admin-failures").json()
+        assert body["count"] == 1 and body["domains"][0]["domain"] == "listme.test"
+        csv_resp = admin_client.get("/api/v1/admin/admin-failures?format=csv")
+        assert csv_resp.status_code == 200 and "listme.test" in csv_resp.text
