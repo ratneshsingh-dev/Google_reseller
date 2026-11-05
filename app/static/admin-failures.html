@@ -92,6 +92,7 @@
       manual:  { label: '🛠 Needs manual fix', desc: 'Google refused again: fix in Google Admin', chip: 'manual' },
     };
     let rows = [], selected = new Set(), results = {}, stopFlag = false, running = false, cat = '';
+    let CONFIRM_WAIT_MS = 2000;   // pause between the re-checks after a fix
 
     async function call(path, method) {
       const res = await fetch(API + path, { method: method || 'GET', credentials: 'include' });
@@ -166,7 +167,13 @@
       try {
         const r = await call(`/admin-failures/${encodeURIComponent(id)}/fix`, 'POST');
         if (r.fixed) {
-          const c = await call(`/admin-failures/${encodeURIComponent(id)}/check?subscription=false`);
+          // Google can take a few seconds to show a new admin as an admin: look up to 4 times.
+          let c = null;
+          for (let i = 0; i < 4; i++) {
+            if (i) await new Promise(res => setTimeout(res, CONFIRM_WAIT_MS));
+            c = await call(`/admin-failures/${encodeURIComponent(id)}/check?subscription=false`);
+            if (c.is_admin === true) break;
+          }
           if (c.is_admin === true) {
             results[id] = { cls: 'ok', html: `✔ Admin confirmed in Google (${esc((r.outcome || '').replace(/_/g, ' ').toLowerCase())}).<br>Login: <span class="mono">${esc(r.admin_email)}</span> · Password: <span class="mono">${esc(r.temporary_password)}</span> (change at first login)` };
             if (row) row.fixed = true;
@@ -178,7 +185,15 @@
           results[id] = { cls: 'bad', html: '✖ Not fixed. Google said: ' + esc(r.reason) + (r.reason_kind === 'google_403' ? '<br>Fix this one by hand in the Google Admin console.' : '<br>You can try again.') };
           if (row) { row.repair_attempts++; row.reason = r.reason; row.reason_kind = r.reason_kind; if (r.reason_kind === 'google_403') row.category = 'manual'; }
         }
-      } catch (e) { results[id] = { cls: 'bad', html: '✖ ' + esc(e.message) }; }
+      } catch (e) {
+        if (/not on the failed-admin list/.test(e.message)) {
+          // Already fixed or marked handled (for example by an earlier click): just refresh the list.
+          results[id] = { cls: '', html: 'Already off the list (fixed or handled). Refreshing…' };
+          if (!running) setTimeout(load, 1200);
+        } else {
+          results[id] = { cls: 'bad', html: '✖ ' + esc(e.message) };
+        }
+      }
       render();
     }
 

@@ -262,3 +262,46 @@ class TestQuickCheckAfterFix:
         monkeypatch.setattr(get_reseller_service(), "list_subscriptions", must_not_be_called)
         body = admin_client.get(f"/api/v1/admin/admin-failures/{job.job_id}/check?subscription=false").json()
         assert body["user_exists"] is True and body["is_admin"] is False
+
+
+class TestConfirmationWaitsForGoogle:
+    """Google answers makeAdmin before the user reads back as an admin. A read-back taken at once
+    gave a false "not fixed" even though the user became an admin a moment later."""
+
+    def _slow_to_show_admin(self, monkeypatch, reads_before_admin: int) -> dict:
+        directory = get_directory_service()
+        original_get, original_make = directory.get_user_safe, directory.make_admin
+        state = {"made": False, "reads_after_make": 0}
+
+        async def make_admin(email):
+            state["made"] = True
+            return await original_make(email)
+
+        async def get_user_safe(email):
+            user = await original_get(email)
+            if user and state["made"]:
+                state["reads_after_make"] += 1
+                if state["reads_after_make"] <= reads_before_admin:
+                    return user.model_copy(update={"is_admin": False})
+            return user
+
+        monkeypatch.setattr(directory, "make_admin", make_admin)
+        monkeypatch.setattr(directory, "get_user_safe", get_user_safe)
+        return state
+
+    def test_an_admin_that_shows_up_a_few_seconds_late_is_still_a_success(self, admin_client, monkeypatch):
+        job = _failed_job(monkeypatch, "slowadmin.test", "make_admin")
+        state = self._slow_to_show_admin(monkeypatch, reads_before_admin=2)
+        body = admin_client.post(f"/api/v1/admin/admin-failures/{job.job_id}/fix").json()
+        assert body["fixed"] is True and state["reads_after_make"] == 3
+        assert get_job_repo().get_job(job.job_id).admin_created is True
+
+    def test_an_admin_that_never_shows_up_is_not_called_fixed(self, admin_client, monkeypatch):
+        from app.services.provisioning_service import ADMIN_CONFIRM_WAITS
+        job = _failed_job(monkeypatch, "neveradmin.test", "make_admin")
+        state = self._slow_to_show_admin(monkeypatch, reads_before_admin=999)
+        body = admin_client.post(f"/api/v1/admin/admin-failures/{job.job_id}/fix").json()
+        assert body["fixed"] is False and "still not an admin" in body["reason"]
+        assert state["reads_after_make"] == len(ADMIN_CONFIRM_WAITS)
+        assert get_job_repo().get_job(job.job_id).admin_created is False
+        assert job.job_id in [j.job_id for j in get_job_repo().list_admin_failures()]

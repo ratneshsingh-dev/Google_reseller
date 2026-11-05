@@ -74,6 +74,7 @@ logger = get_logger(__name__)
 
 GOOGLE_MAX_SEATS_PER_CALL = 100  # Google Reseller API seat limit per call
 MAKE_ADMIN_NOT_FOUND_WAITS = (2, 4, 8, 16)  # seconds; the last entry is never slept
+ADMIN_CONFIRM_WAITS = (0, 2, 3, 5, 5)        # seconds before each read-back after makeAdmin (repair)
 
 
 def _is_not_found(exc: Exception) -> bool:
@@ -979,9 +980,18 @@ class ProvisioningService:
                 await self._make_admin(email)
                 if outcome != "CREATED_AND_ADMIN":
                     outcome = "MADE_ADMIN"
-                confirmed = await self._retry_operation(self._directory.get_user_safe, email)
-                if not confirmed or not confirmed.is_admin:
-                    raise RuntimeError("Google accepted makeAdmin but the user is still not an admin")
+                # Google answers makeAdmin before the user shows as an admin when read back, so
+                # look again for a few seconds before calling it a failure.
+                for wait in ADMIN_CONFIRM_WAITS:
+                    if wait:
+                        await asyncio.sleep(wait)
+                    confirmed = await self._retry_operation(self._directory.get_user_safe, email)
+                    if confirmed and confirmed.is_admin:
+                        break
+                else:
+                    raise RuntimeError(
+                        "Google accepted makeAdmin but the user is still not an admin after "
+                        f"{sum(ADMIN_CONFIRM_WAITS)} seconds")
         except Exception as exc:
             self._job_repo.update_fields(
                 job.job_id,
