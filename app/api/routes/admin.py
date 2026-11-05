@@ -652,7 +652,8 @@ def fix_admin(job_id: str, admin=Depends(require_admin)) -> dict:
     finally:
         with _repairs_lock:
             _repairs_running.discard(job_id)
-    _audit_admin_action(job, "ADMIN_REPAIR", "SUCCESS", by, outcome=result["outcome"])
+    _audit_admin_action(job, "ADMIN_REPAIR", "SUCCESS", by, outcome=result["outcome"],
+                        admin_email=result["admin_email"])
     return {"fixed": True, "job_id": job_id, "domain": job.primary_domain, **result}
 
 
@@ -660,7 +661,11 @@ def fix_admin(job_id: str, admin=Depends(require_admin)) -> dict:
 def check_admin(job_id: str, subscription: bool = Query(True), admin=Depends(require_admin)) -> dict:
     from app.dependencies import get_provisioning_service
 
-    job = _failed_admin_job(job_id)
+    from app.dependencies import get_job_repo
+
+    job = get_job_repo().get_job(job_id)
+    if job is None or not job.request_payload:
+        raise HTTPException(status_code=404, detail="Job not found")
     try:
         state = asyncio.run(get_provisioning_service().check_admin(job, with_subscription=subscription))
     except Exception as exc:
@@ -676,8 +681,80 @@ def mark_admin_handled(job_id: str, admin=Depends(require_admin)) -> dict:
     job = _failed_admin_job(job_id)
     get_job_repo().update_fields(
         job_id, admin_created=True, admin_failure_reason=f"Fixed manually (marked by {by})")
-    _audit_admin_action(job, "ADMIN_MARKED_HANDLED", "SUCCESS", by)
+    try:
+        from app.services.provisioning_service import ProvisioningService
+        admin_email = ProvisioningService.job_admin_email(job)
+    except Exception:
+        admin_email = None
+    _audit_admin_action(job, "ADMIN_MARKED_HANDLED", "SUCCESS", by, admin_email=admin_email)
     return {"job_id": job_id, "domain": job.primary_domain, "handled": True}
+
+
+_FIX_METHODS = {
+    "CREATED_AND_ADMIN": "Fix button: created the user and made it admin",
+    "MADE_ADMIN": "Fix button: made the existing user admin",
+    "ALREADY_ADMIN": "Fix button: user was already an admin",
+}
+
+
+@router.get("/admin-failures/fixed", summary="Domains whose admin was fixed from the dashboard (history)")
+def fixed_admins(
+    reseller_id: Optional[str] = Query(None),
+    format: str = Query("json", pattern="^(json|csv)$"),
+    admin=Depends(require_admin),
+):
+    """Every domain fixed with the Fix button or taken off the list with Mark handled, newest
+    first, built from the audit log (so it includes fixes made before this tab existed)."""
+    import csv
+    import io
+
+    from fastapi.responses import Response
+
+    from app.core.security import generate_temporary_password
+    from app.dependencies import get_job_repo
+
+    audit = AuditRepository(get_store())
+    entries = audit.list_by_action("ADMIN_REPAIR") + audit.list_by_action("ADMIN_MARKED_HANDLED")
+    latest: dict = {}
+    for e in sorted(entries, key=lambda x: x.timestamp):     # oldest first, so the last success wins
+        if e.status == "SUCCESS":
+            latest[e.resource_id] = e
+    rows = []
+    for job_id, e in latest.items():
+        if reseller_id and e.reseller_id != reseller_id:
+            continue
+        d = e.details or {}
+        admin_email, domain = d.get("admin_email"), d.get("domain")
+        if not admin_email:                                   # entries written before the email was recorded
+            job = get_job_repo().get_job(job_id)
+            if job and job.request_payload:
+                from app.services.provisioning_service import ProvisioningService
+                try:
+                    admin_email = ProvisioningService.job_admin_email(job)
+                except Exception:
+                    admin_email = None
+        rows.append({
+            "fixed_at": e.timestamp.isoformat() if e.timestamp else None,
+            "fixed_by": d.get("by"),
+            "domain": domain,
+            "job_id": job_id,
+            "reseller_id": e.reseller_id,
+            "admin_email": admin_email,
+            "method": ("Marked handled: fixed by hand in the Google Admin console"
+                       if e.action == "ADMIN_MARKED_HANDLED"
+                       else _FIX_METHODS.get(d.get("outcome"), "Fix button")),
+            "temporary_password": None if e.action == "ADMIN_MARKED_HANDLED" else generate_temporary_password(),
+        })
+    rows.sort(key=lambda r: r["fixed_at"] or "", reverse=True)
+    if format == "csv":
+        out = io.StringIO()
+        writer = csv.DictWriter(out, fieldnames=["fixed_at", "fixed_by", "domain", "job_id", "reseller_id",
+                                                 "admin_email", "method", "temporary_password"])
+        writer.writeheader()
+        writer.writerows(rows)
+        return Response(out.getvalue(), media_type="text/csv",
+                        headers={"Content-Disposition": 'attachment; filename="fixed_admins.csv"'})
+    return {"count": len(rows), "domains": rows}
 
 
 @router.get("/admin-failures", summary="Domains created without a working admin user (read-only)")

@@ -305,3 +305,71 @@ class TestConfirmationWaitsForGoogle:
         assert state["reads_after_make"] == len(ADMIN_CONFIRM_WAITS)
         assert get_job_repo().get_job(job.job_id).admin_created is False
         assert job.job_id in [j.job_id for j in get_job_repo().list_admin_failures()]
+
+
+class TestFixedTab:
+    """History of everything fixed from the dashboard, so a fixed domain does not just vanish."""
+
+    def _fixed(self, admin_client):
+        return admin_client.get("/api/v1/admin/admin-failures/fixed").json()
+
+    def test_a_fix_is_listed_with_who_when_and_how(self, admin_client, monkeypatch):
+        job = _failed_job(monkeypatch, "fixedtab.test", "make_admin")
+        assert admin_client.post(f"/api/v1/admin/admin-failures/{job.job_id}/fix").json()["fixed"] is True
+        body = self._fixed(admin_client)
+        row = next(r for r in body["domains"] if r["job_id"] == job.job_id)
+        assert body["count"] == 1
+        assert row["domain"] == "fixedtab.test" and row["fixed_by"] == "boss@econz.test"
+        assert row["admin_email"] == ProvisioningRequest(**job.request_payload).admin_email
+        assert "made the existing user admin" in row["method"] and row["fixed_at"]
+        assert row["temporary_password"] == STATIC_PASSWORD
+
+    def test_a_created_user_is_described_as_created(self, admin_client, monkeypatch):
+        job = _failed_job(monkeypatch, "fixedcreate.test", "create_user")
+        admin_client.post(f"/api/v1/admin/admin-failures/{job.job_id}/fix")
+        row = next(r for r in self._fixed(admin_client)["domains"] if r["job_id"] == job.job_id)
+        assert "created the user" in row["method"]
+
+    def test_mark_handled_is_listed_as_fixed_by_hand_without_a_password(self, admin_client, monkeypatch):
+        job = _failed_job(monkeypatch, "fixedhand.test", "create_user")
+        admin_client.post(f"/api/v1/admin/admin-failures/{job.job_id}/mark-handled")
+        row = next(r for r in self._fixed(admin_client)["domains"] if r["job_id"] == job.job_id)
+        assert "by hand" in row["method"] and row["temporary_password"] is None and row["admin_email"]
+
+    def test_a_failed_attempt_is_not_listed_as_fixed(self, admin_client, monkeypatch):
+        job = _failed_job(monkeypatch, "notfixed.test", "make_admin")
+
+        async def refuse(email):
+            raise http_error(403)
+        monkeypatch.setattr(get_directory_service(), "make_admin", refuse)
+        assert admin_client.post(f"/api/v1/admin/admin-failures/{job.job_id}/fix").json()["fixed"] is False
+        assert job.job_id not in [r["job_id"] for r in self._fixed(admin_client)["domains"]]
+
+    def test_an_entry_written_before_the_email_was_recorded_still_shows_the_email(self, admin_client, monkeypatch):
+        import uuid
+        from app.models.reseller_models import AuditLogDocument
+        from app.repositories.audit_repository import AuditRepository
+        from app.repositories.firestore_client import get_store
+        job = _failed_job(monkeypatch, "olderentry.test", "make_admin")
+        AuditRepository(get_store()).create(AuditLogDocument(
+            log_id=f"LOG-{uuid.uuid4().hex[:8].upper()}", reseller_id=job.reseller_id or "",
+            action="ADMIN_REPAIR", resource_type="job", resource_id=job.job_id, status="SUCCESS",
+            details={"by": "someone@econz.test", "domain": "olderentry.test", "outcome": "MADE_ADMIN"}))
+        row = next(r for r in self._fixed(admin_client)["domains"] if r["job_id"] == job.job_id)
+        assert row["admin_email"] == ProvisioningRequest(**job.request_payload).admin_email
+        assert row["fixed_by"] == "someone@econz.test"
+
+    def test_csv_partner_filter_and_admin_only(self, admin_client, client, monkeypatch):
+        job = _failed_job(monkeypatch, "fixedcsv.test", "make_admin")
+        admin_client.post(f"/api/v1/admin/admin-failures/{job.job_id}/fix")
+        csv_resp = admin_client.get("/api/v1/admin/admin-failures/fixed?format=csv")
+        assert csv_resp.status_code == 200 and "fixedcsv.test" in csv_resp.text and "boss@econz.test" in csv_resp.text
+        assert admin_client.get("/api/v1/admin/admin-failures/fixed?reseller_id=RSL-OTHER").json()["count"] == 0
+        app.dependency_overrides.pop(require_admin, None)
+        assert client.get("/api/v1/admin/admin-failures/fixed").status_code == 401
+
+    def test_a_fixed_domain_can_still_be_checked(self, admin_client, monkeypatch):
+        job = _failed_job(monkeypatch, "fixedcheck.test", "make_admin")
+        admin_client.post(f"/api/v1/admin/admin-failures/{job.job_id}/fix")
+        body = admin_client.get(f"/api/v1/admin/admin-failures/{job.job_id}/check?subscription=false").json()
+        assert body["user_exists"] is True and body["is_admin"] is True

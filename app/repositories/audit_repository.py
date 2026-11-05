@@ -35,6 +35,13 @@ class AuditRepository:
         docs.sort(key=lambda d: d.timestamp or "", reverse=True)
         return docs
 
+    def list_by_action(self, action: str) -> List[AuditLogDocument]:
+        """All entries of one kind (single-field equality query, so no full scan), newest first."""
+        results = self._store.query(self.COLLECTION, "action", "==", action)
+        docs = [AuditLogDocument(**r) for r in results]
+        docs.sort(key=lambda d: d.timestamp or "", reverse=True)
+        return docs
+
     def list_all(self) -> List[AuditLogDocument]:
         """List all audit entries across all resellers."""
         results = self._store.list_all(self.COLLECTION)
