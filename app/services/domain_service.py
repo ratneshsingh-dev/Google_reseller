@@ -8,6 +8,9 @@ updated after Google confirms, so the two never drift apart.
 
 from __future__ import annotations
 
+import asyncio
+import re
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Optional, Tuple
@@ -15,8 +18,11 @@ from typing import Any, Optional, Tuple
 from app.core.config import get_settings
 from app.core.google_retry import call_with_retry
 from app.core.logging import get_logger
+from app.core.security import generate_corporate_email, generate_temporary_password
 from app.models.database import CompanyDocument, SubscriptionDocument
 from app.models.google_api import (
+    GoogleCreateUserRequest,
+    GoogleUserName,
     GoogleChangSeatsRequest,
     GoogleSubscription,
     GoogleSubscriptionSeats,
@@ -28,6 +34,7 @@ from app.repositories.coordination_repository import LockRepository
 from app.repositories.batching import ContentionError
 from app.repositories.reseller_repository import QuotaExceededError, ResellerRepository
 from app.repositories.subscription_repository import SubscriptionRepository
+from app.models.requests import ProvisioningRequest
 from app.services.reseller_service import ResellerService
 
 logger = get_logger(__name__)
@@ -35,6 +42,14 @@ logger = get_logger(__name__)
 GOOGLE_MAX_SEATS_PER_CALL = 100
 DOMAIN_ACTION_LOCK_SECONDS = 3 * 60
 REDUCIBLE_PLANS = {"FLEXIBLE"}
+ADMIN_NOT_FOUND_WAITS = (2, 4, 8, 16)   # makeAdmin right after create: Google may not see the user yet
+ADMIN_CONFIRM_WAITS = (0, 2, 3, 5, 5)   # isAdmin shows up a few seconds after makeAdmin
+_USERNAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9._'-]*[a-z0-9])?$")
+# Admin fixes allowed to talk to Google at the same moment on one server. Extra calls wait their
+# turn (up to ADMIN_QUEUE_WAIT seconds) instead of all hitting Google's rate limits together.
+ADMIN_PARALLEL = 8
+ADMIN_QUEUE_WAIT = 120
+_ADMIN_SLOTS = threading.BoundedSemaphore(ADMIN_PARALLEL)
 RESELLER_SUSPENSION = "RESELLER_INITIATED"
 TRANSFERRED = "TRANSFERRED_TO_GOOGLE"
 
@@ -71,6 +86,8 @@ class DomainService:
         reseller_repo: ResellerRepository,
         audit_repo: AuditRepository,
         lock_repo: LockRepository,
+        directory_service=None,
+        job_repo=None,
     ) -> None:
         self._google = reseller_service
         self._companies = company_repo
@@ -78,6 +95,8 @@ class DomainService:
         self._resellers = reseller_repo
         self._audit = audit_repo
         self._locks = lock_repo
+        self._directory = directory_service
+        self._jobs = job_repo
 
     # ------------------------------------------------------------------
     # Public actions (each holds the domain lock, so actions on one domain never overlap)
@@ -109,6 +128,22 @@ class DomainService:
             )
         async with self._domain_lock(domain, "delete"):
             return await self._delete(domain, reseller, ip)
+
+    async def add_admin(
+        self, domain: str, reseller: ResellerDocument, first_name: Optional[str] = None,
+        last_name: Optional[str] = None, username: Optional[str] = None, ip: str = "",
+    ) -> dict:
+        # Wait for a free slot BEFORE taking the domain lock, so queueing never eats into the
+        # lock's lifetime. This runs on its own worker thread, so waiting blocks nothing else.
+        if not _ADMIN_SLOTS.acquire(timeout=ADMIN_QUEUE_WAIT):
+            raise DomainActionError(503, {
+                "error": "Server busy",
+                "detail": "Too many admin fixes are running at once. Try again in a few seconds."})
+        try:
+            async with self._domain_lock(domain, "add_admin"):
+                return await self._add_admin(domain, reseller, first_name, last_name, username, ip)
+        finally:
+            _ADMIN_SLOTS.release()
 
     @asynccontextmanager
     async def _domain_lock(self, domain: str, operation: str):
@@ -286,6 +321,119 @@ class DomainService:
             "google_subscription_id": sub.subscription_id,
             "message": message,
         }
+
+    async def _add_admin(
+        self, domain: str, reseller: ResellerDocument, first_name: Optional[str], last_name: Optional[str],
+        username: Optional[str], ip: str,
+    ) -> dict:
+        """Create the domain's admin user (standard temporary password) and make it a super
+        admin. The result is read back from Google before success is reported. An existing user is
+        only promoted: their password is never changed."""
+        company = self._owned_company(domain, reseller)
+        dom = company.primary_domain.lower()
+        job, stored = self._stored_admin(dom, reseller.reseller_id)
+        if not username and not (first_name or last_name) and stored:
+            # No details sent: use the admin from the original provisioning request.
+            first_name, last_name, email = stored.admin_first_name, stored.admin_last_name, stored.admin_email
+        else:
+            if not (first_name and last_name):
+                if not stored:
+                    raise DomainActionError(
+                        400, "No admin is stored for this domain; send first_name and last_name.")
+                first_name, last_name = first_name or stored.admin_first_name, last_name or stored.admin_last_name
+            email = self._admin_email(dom, first_name, last_name, username)
+        password = generate_temporary_password()
+        outcome = "ALREADY_ADMIN"
+        try:
+            user = await self._google_call(self._directory.get_user_safe, email)
+            if user is None:
+                await self._google_call(
+                    self._directory.create_user,
+                    GoogleCreateUserRequest(
+                        primaryEmail=email,
+                        name=GoogleUserName(givenName=first_name, familyName=last_name),
+                        password=password, changePasswordAtNextLogin=True, suspended=False,
+                    ),
+                )
+                outcome = "CREATED_AND_ADMIN"
+            if user is None or not user.is_admin:
+                await self._grant_admin(email)
+                if outcome != "CREATED_AND_ADMIN":
+                    outcome = "MADE_ADMIN"
+                for wait in ADMIN_CONFIRM_WAITS:
+                    if wait:
+                        await asyncio.sleep(wait)
+                    confirmed = await self._google_call(self._directory.get_user_safe, email)
+                    if confirmed and confirmed.is_admin:
+                        break
+                else:
+                    raise DomainActionError(
+                        502, f"Google accepted the request but {email} is still not an admin after "
+                             f"{sum(ADMIN_CONFIRM_WAITS)} seconds. Check again shortly or retry.")
+        except DomainActionError as exc:
+            self._record(reseller.reseller_id, "ADD_ADMIN", dom, ip,
+                         {"admin_email": email, "error": str(exc.detail)[:300]}, status="FAILED")
+            raise
+        self._record(reseller.reseller_id, "ADD_ADMIN", dom, ip, {"admin_email": email, "outcome": outcome})
+        if job and stored and stored.admin_email.lower() == email.lower():
+            # It is the domain's original admin: clear it from the Failed Admins list.
+            try:
+                self._jobs.update_fields(job.job_id, admin_created=True, admin_failure_reason=None,
+                                         users_created=1, users_failed=0)
+            except Exception:
+                logger.warning("admin_job_sync_failed", domain=dom)
+        logger.info("domain_admin_fixed", domain=dom, admin_email=email, outcome=outcome)
+        out = {
+            "domain": dom,
+            "admin_email": email,
+            "outcome": outcome,
+            "is_admin": True,
+            "message": f"{email} is now a super admin of {dom}.",
+        }
+        if outcome == "CREATED_AND_ADMIN":
+            out["temporary_password"] = password
+            out["message"] += " The user must change the temporary password at first sign-in."
+        else:
+            out["message"] += " The user already existed, so the password was not changed."
+        return out
+
+    def _stored_admin(self, domain: str, reseller_id: str):
+        """The newest job for this domain (this partner's) and the admin it was asked to create."""
+        if self._jobs is None:
+            return None, None
+        for job in self._jobs.list_by_domain(domain):
+            if job.reseller_id == reseller_id and job.request_payload:
+                try:
+                    return job, ProvisioningRequest(**job.request_payload)
+                except Exception:
+                    return None, None
+        return None, None
+
+    @staticmethod
+    def _admin_email(domain: str, first_name: str, last_name: str, username: Optional[str]) -> str:
+        name = (username or "").strip().lower()
+        if not name:
+            return generate_corporate_email(first_name, last_name, domain, set())
+        local, sep, dom = name.partition("@")
+        if sep and dom != domain:
+            raise DomainActionError(400, f"username domain '{dom}' must be {domain}.")
+        if len(local) > 64 or ".." in local or not _USERNAME_RE.match(local):
+            raise DomainActionError(
+                400, f"Invalid username '{local}': use letters, digits, '.', '-', '_' or apostrophe; "
+                     "start and end with a letter or digit (max 64 characters).")
+        return f"{local}@{domain}"
+
+    async def _grant_admin(self, email: str) -> None:
+        """makeAdmin, retrying while Google cannot yet see a user created moments ago."""
+        for attempt, wait in enumerate(ADMIN_NOT_FOUND_WAITS):
+            try:
+                await self._google_call(self._directory.make_admin, email)
+                return
+            except DomainActionError as exc:
+                missing = exc.status_code == 404 or "not found" in str(exc.detail).lower()
+                if not missing or attempt == len(ADMIN_NOT_FOUND_WAITS) - 1:
+                    raise
+                await asyncio.sleep(wait)
 
     def _owned_company(self, domain: str, reseller: ResellerDocument) -> CompanyDocument:
         company = self._companies.get_by_domain(domain.strip().lower())

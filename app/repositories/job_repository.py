@@ -64,6 +64,13 @@ class JobRepository:
         results = self._store.list_all(self.JOBS_COLLECTION)
         return [ProvisioningJobDocument(**r) for r in results]
 
+    def list_by_domain(self, domain: str) -> List[ProvisioningJobDocument]:
+        """Jobs for one domain (single-field equality query), newest first."""
+        docs = [ProvisioningJobDocument(**r)
+                for r in self._store.query(self.JOBS_COLLECTION, "primary_domain", "==", domain.lower())]
+        docs.sort(key=lambda j: j.created_at or "", reverse=True)
+        return docs
+
     def list_by_reseller(self, reseller_id: str) -> List[ProvisioningJobDocument]:
         results = self._store.query(self.JOBS_COLLECTION, "reseller_id", "==", reseller_id)
         return [ProvisioningJobDocument(**r) for r in results]

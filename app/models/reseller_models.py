@@ -121,6 +121,24 @@ class ChangeLicencesRequest(BaseModel):
     license_count: int = Field(..., ge=1, description="New TOTAL licence count for the domain")
 
 
+class AddAdminRequest(BaseModel):
+    """Create the domain's admin user (or promote it if it exists) and make it a super admin.
+    Send nothing to use the admin stored from the original provisioning request."""
+    first_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    last_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    username: Optional[str] = Field(
+        None, max_length=254,
+        description="Login name, e.g. 'ratnesh.s' -> ratnesh.s@<domain>. A full address on the "
+                    "domain is also accepted. Defaults to first.last.",
+    )
+
+
+class BulkAdminRequest(BaseModel):
+    """Fix the original admin of several domains in one call."""
+    domains: List[str] = Field(..., min_length=1, max_length=50,
+                               description="Up to 50 domains. Each uses the admin from its original request.")
+
+
 class UpdateResellerRequest(BaseModel):
     """Admin updates a reseller's cap, role, or status."""
     max_licence_cap: Optional[int] = Field(None, ge=1)

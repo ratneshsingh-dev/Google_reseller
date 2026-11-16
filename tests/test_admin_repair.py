@@ -373,3 +373,45 @@ class TestFixedTab:
         admin_client.post(f"/api/v1/admin/admin-failures/{job.job_id}/fix")
         body = admin_client.get(f"/api/v1/admin/admin-failures/{job.job_id}/check?subscription=false").json()
         assert body["user_exists"] is True and body["is_admin"] is True
+
+
+class TestWhoFixedItShowsAsAnEmail:
+    """Real logins give require_admin a user object (email, name, picture). Its text form
+    ("email='x' name='x' picture=''") ended up in the "Fixed by" column."""
+
+    @pytest.fixture
+    def real_admin_client(self, client):
+        from app.api.routes.auth import UserInfo
+        user = UserInfo(email="ratnesh.s@econz.net", name="ratnesh.s", picture="", given_name="")
+        app.dependency_overrides[require_admin] = lambda: user
+        yield client
+        app.dependency_overrides.pop(require_admin, None)
+
+    def test_fix_records_just_the_email(self, real_admin_client, monkeypatch):
+        job = _failed_job(monkeypatch, "whofix.test", "make_admin")
+        assert real_admin_client.post(f"/api/v1/admin/admin-failures/{job.job_id}/fix").json()["fixed"] is True
+        row = next(r for r in real_admin_client.get("/api/v1/admin/admin-failures/fixed").json()["domains"]
+                   if r["job_id"] == job.job_id)
+        assert row["fixed_by"] == "ratnesh.s@econz.net"
+
+    def test_mark_handled_records_just_the_email(self, real_admin_client, monkeypatch):
+        job = _failed_job(monkeypatch, "whohand.test", "create_user")
+        real_admin_client.post(f"/api/v1/admin/admin-failures/{job.job_id}/mark-handled")
+        row = next(r for r in real_admin_client.get("/api/v1/admin/admin-failures/fixed").json()["domains"]
+                   if r["job_id"] == job.job_id)
+        assert row["fixed_by"] == "ratnesh.s@econz.net"
+
+    def test_entries_saved_in_the_old_format_are_cleaned_when_listed(self, real_admin_client, monkeypatch):
+        import uuid
+        from app.models.reseller_models import AuditLogDocument
+        from app.repositories.audit_repository import AuditRepository
+        from app.repositories.firestore_client import get_store
+        job = _failed_job(monkeypatch, "whoold.test", "make_admin")
+        AuditRepository(get_store()).create(AuditLogDocument(
+            log_id=f"LOG-{uuid.uuid4().hex[:8].upper()}", reseller_id=job.reseller_id or "",
+            action="ADMIN_REPAIR", resource_type="job", resource_id=job.job_id, status="SUCCESS",
+            details={"by": "email='ratnesh.s@econz.net' name='ratnesh.s' picture='' given_name=''",
+                     "domain": "whoold.test", "outcome": "MADE_ADMIN"}))
+        row = next(r for r in real_admin_client.get("/api/v1/admin/admin-failures/fixed").json()["domains"]
+                   if r["job_id"] == job.job_id)
+        assert row["fixed_by"] == "ratnesh.s@econz.net"

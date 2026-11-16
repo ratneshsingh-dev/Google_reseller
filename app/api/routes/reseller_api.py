@@ -55,6 +55,7 @@ from typing import Any, List, Optional
 
 from fastapi import (
     APIRouter,
+    Body,
     Depends,
     File,
     Form,
@@ -84,6 +85,8 @@ from app.dependencies import (
 )
 from app.models.requests import BulkProvisioningRequest, ProvisioningRequest
 from app.models.reseller_models import (
+    AddAdminRequest,
+    BulkAdminRequest,
     AuditLogDocument,
     ChangeLicencesRequest,
     QuotaResponse,
@@ -601,6 +604,53 @@ async def change_domain_licences(
     return await _run_domain_action(
         get_domain_service().change_licences(domain, reseller, body.license_count, _client_ip(request))
     )
+
+
+@router.post("/domains/{domain}/admin", summary="Create the domain's admin user and make it a super admin")
+@limiter.limit("60/minute")
+async def add_domain_admin(
+    domain: str,
+    request: Request,
+    body: AddAdminRequest = Body(default_factory=AddAdminRequest),
+    reseller: ResellerDocument = Depends(require_role(ResellerRole.RESELLER_FULL)),
+) -> dict:
+    """Fixes a domain whose admin was not created or not made admin. Send no body to use the admin
+    from the original request, or send first_name / last_name / username for a specific admin.
+    Creates the user if missing (standard temporary password), makes it a super admin and confirms
+    it with Google. An existing user is only promoted; their password is left alone."""
+    return await _run_domain_action(get_domain_service().add_admin(
+        domain, reseller, body.first_name, body.last_name, body.username, _client_ip(request)))
+
+
+@router.post("/domains/admin/bulk", summary="Fix the admin of up to 50 domains in one call")
+@limiter.limit("20/minute")
+async def bulk_fix_admins(
+    body: BulkAdminRequest,
+    request: Request,
+    reseller: ResellerDocument = Depends(require_role(ResellerRole.RESELLER_FULL)),
+) -> dict:
+    """Runs the single-domain admin fix for every domain, several at a time (the server limits how
+    many reach Google at once). One failing domain never stops the others: each gets its own result."""
+    ip = _client_ip(request)
+    domains = list(dict.fromkeys(d.strip().lower() for d in body.domains if d.strip()))
+
+    # Only a few domains at a time, so a big list cannot tie up every worker thread.
+    turn = asyncio.Semaphore(8)
+
+    async def one(domain: str) -> dict:
+        try:
+            async with turn:
+                result = await _run_domain_action(get_domain_service().add_admin(domain, reseller, ip=ip))
+            return {"domain": domain, "status": "fixed", **result}
+        except HTTPException as exc:
+            detail = exc.detail.get("detail") if isinstance(exc.detail, dict) else exc.detail
+            return {"domain": domain, "status": "failed", "http_status": exc.status_code, "error": detail}
+        except Exception as exc:
+            return {"domain": domain, "status": "failed", "http_status": 500, "error": str(exc)[:200]}
+
+    results = await asyncio.gather(*(one(d) for d in domains))
+    fixed = sum(1 for r in results if r["status"] == "fixed")
+    return {"requested": len(domains), "fixed": fixed, "failed": len(domains) - fixed, "results": results}
 
 
 @router.delete("/domains/{domain}", summary="Remove a domain from your account (transfers it to Google)")

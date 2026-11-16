@@ -16,6 +16,7 @@ GET    /api/v1/admin/dashboard/summary                 — Global stats
 from __future__ import annotations
 
 import asyncio
+import re
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -637,7 +638,7 @@ def fix_admin(job_id: str, admin=Depends(require_admin)) -> dict:
     the missing step (create user, make admin), then confirms the result."""
     from app.dependencies import get_provisioning_service
 
-    by = admin.get("email", "") if isinstance(admin, dict) else str(admin)
+    by = _actor_email(admin)
     job = _failed_admin_job(job_id)
     with _repairs_lock:
         if job_id in _repairs_running:
@@ -677,7 +678,7 @@ def check_admin(job_id: str, subscription: bool = Query(True), admin=Depends(req
 def mark_admin_handled(job_id: str, admin=Depends(require_admin)) -> dict:
     from app.dependencies import get_job_repo
 
-    by = admin.get("email", "") if isinstance(admin, dict) else str(admin)
+    by = _actor_email(admin)
     job = _failed_admin_job(job_id)
     get_job_repo().update_fields(
         job_id, admin_created=True, admin_failure_reason=f"Fixed manually (marked by {by})")
@@ -688,6 +689,29 @@ def mark_admin_handled(job_id: str, admin=Depends(require_admin)) -> dict:
         admin_email = None
     _audit_admin_action(job, "ADMIN_MARKED_HANDLED", "SUCCESS", by, admin_email=admin_email)
     return {"job_id": job_id, "domain": job.primary_domain, "handled": True}
+
+
+_ACTOR_EMAIL_RE = re.compile(r"email='([^']+)'")
+
+
+def _actor_email(admin) -> str:
+    """The signed-in admin's email. require_admin returns a user object (email, name, picture),
+    or a dict in tests; turning the object into text gave "email='x' name='x' picture=''"."""
+    if isinstance(admin, dict):
+        return admin.get("email", "")
+    email = getattr(admin, "email", None)
+    if email:
+        return str(email)
+    found = _ACTOR_EMAIL_RE.search(str(admin))
+    return found.group(1) if found else str(admin)
+
+
+def _clean_actor(value) -> Optional[str]:
+    """Entries saved before the fix hold the whole object as text; pull the email out of those."""
+    if not value:
+        return value
+    found = _ACTOR_EMAIL_RE.search(str(value))
+    return found.group(1) if found else value
 
 
 _FIX_METHODS = {
@@ -735,7 +759,7 @@ def fixed_admins(
                     admin_email = None
         rows.append({
             "fixed_at": e.timestamp.isoformat() if e.timestamp else None,
-            "fixed_by": d.get("by"),
+            "fixed_by": _clean_actor(d.get("by")),
             "domain": domain,
             "job_id": job_id,
             "reseller_id": e.reseller_id,

@@ -163,6 +163,8 @@ def get_domain_service() -> DomainService:
         reseller_repo=get_reseller_repo(),
         audit_repo=get_audit_repo(),
         lock_repo=get_lock_repo(),
+        directory_service=get_directory_service(),
+        job_repo=get_job_repo(),
     )
 
 
