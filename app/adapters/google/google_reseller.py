@@ -97,14 +97,27 @@ def _parse_subscription(resp: dict) -> GoogleSubscription:
             isCommitmentPlan=plan.get("isCommitmentPlan", False),
         ),
         seats=GoogleSubscriptionSeats(
-            # Annual plans report numberOfSeats; TRIAL/FLEXIBLE report maximumNumberOfSeats.
-            numberOfSeats=max(
-                seats.get("numberOfSeats", 0) or 0,
-                seats.get("maximumNumberOfSeats", 0) or 0,
-            ),
+            numberOfSeats=_seat_count(plan, seats),
             licensedNumberOfSeats=seats.get("licensedNumberOfSeats", 0),
         ),
     )
+
+
+def _seat_count(plan: dict, seats: dict) -> int:
+    """The licence count of a subscription, read from the field that means it for that plan.
+
+    ANNUAL (commitment) plans: numberOfSeats is what was bought. Google also reports
+    maximumNumberOfSeats there, which is only the cap (300), so it must NOT be used: taking the
+    larger of the two made every annual domain look like it had 300 licences, which broke
+    increases ("can only be reduced"), repeat requests ("already has 300 licences") and refunds.
+    FLEXIBLE / TRIAL plans: maximumNumberOfSeats is the licence count.
+    """
+    number = seats.get("numberOfSeats", 0) or 0
+    maximum = seats.get("maximumNumberOfSeats", 0) or 0
+    name = str(plan.get("planName", "")).upper()
+    if plan.get("isCommitmentPlan") or name.startswith("ANNUAL"):
+        return number or seats.get("licensedNumberOfSeats", 0) or 0   # never the 300 cap
+    return maximum or number
 
 
 class GoogleResellerService(ResellerService):
